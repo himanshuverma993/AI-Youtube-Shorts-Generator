@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from typing import Optional
 
-from ..config import LOCAL_OUTPUT_DIR
+from ..config import OUTPUT_DIR
 
 
 def _import_ytdlp():
@@ -18,7 +18,7 @@ def _import_ytdlp():
     except ImportError as e:
         raise RuntimeError(
             "yt-dlp is required for --mode local. Install it with:\n"
-            "    pip install -r requirements-local.txt"
+            "    pip install -r requirements.txt"
         ) from e
     return yt_dlp
 
@@ -100,7 +100,7 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
         return local_path
 
     yt_dlp = _import_ytdlp()
-    out_dir = out_dir or LOCAL_OUTPUT_DIR
+    out_dir = out_dir or OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
 
     video_id = _extract_youtube_video_id(video_url)
@@ -119,6 +119,13 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
         "no_warnings": True,
         "noprogress": True,
     }
+
+    # Optional authenticated downloads — vital on datacenter IPs (GitHub
+    # Actions runners) where YouTube frequently bot-checks anonymous traffic.
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts["cookiefile"] = cookies_file
+        print(f"[download/local] using cookie file: {cookies_file}", flush=True)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(video_url, download=True)
