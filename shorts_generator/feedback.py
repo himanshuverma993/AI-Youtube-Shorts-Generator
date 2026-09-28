@@ -389,7 +389,9 @@ def build_feedback_block(stats: Dict, for_stage: str = "highlights") -> str:
     if len(posts) < FEEDBACK_MIN_POSTS:
         return ""
     top = posts[:3]
-    bottom = posts[-3:][::-1]
+    # Perfection sweep: with only 5–6 posts the naive last-3 overlaps top-3 —
+    # the same post can't be BOTH the model to copy and the pattern to avoid.
+    bottom = [p for p in posts[::-1] if p not in top][:3]
     scoring = stats.get("scoring") or {}
     scoring_note = "; ".join(f"{k}: {v}" for k, v in scoring.items()) or "60% retention + 40% view velocity"
     lines = [

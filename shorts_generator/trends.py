@@ -150,10 +150,13 @@ def build_trend_block(ctx: Dict, for_stage: str = "highlights") -> str:
     ]
     yt = ctx.get("youtube") or []
     if yt:
-        sample = "; ".join(
-            f"\"{i['title']}\"" + (f" ({i['views']:,} views)" if i.get("views") else "")
-            for i in yt[:6]
-        )
+        def _views_txt(item):
+            try:
+                v = int(item.get("views") or 0)
+            except (TypeError, ValueError):
+                v = 0  # perfection sweep: yt-dlp can return non-int views
+            return f" ({v:,} views)" if v else ""
+        sample = "; ".join(f"\"{i['title']}\"{_views_txt(i)}" for i in yt[:6])
         lines.append(f"- What viewers currently watch in this niche ({ctx.get('niche', '')} shorts): {sample}")
     gt = ctx.get("google_trends") or []
     if gt:

@@ -17,6 +17,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_int(name: str, default: int) -> int:
+    """Garbage-proof int env: a typo must never crash the WHOLE system at
+    import time (audit perfection sweep)."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        print(f"[config] ⚠ {name} is not a valid integer — using default {default}", flush=True)
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        print(f"[config] ⚠ {name} is not a valid number — using default {default}", flush=True)
+        return float(default)
+
+
 # --------------------------------------------------------------------------
 # Groq (free tier) — get a key at https://console.groq.com/keys
 # One key powers both the Whisper transcription endpoint and the chat models.
@@ -27,9 +46,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo").strip()
 # Hosted Llama for highlight ranking + metadata generation.
 GROQ_LLM_MODEL = os.getenv("GROQ_LLM_MODEL", "llama-3.3-70b-versatile").strip()
-GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT", "300"))
+GROQ_TIMEOUT_SECONDS = _env_float("GROQ_TIMEOUT", 300)
 # Retry budget shared by BOTH LLM backends (Groq primary + Cerebras fallback).
-GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "5"))
+GROQ_MAX_RETRIES = _env_int("GROQ_MAX_RETRIES", "5")
 
 # ---------------------------------------------------------------------------
 # Cerebras — automatic LLM fallback when Groq hard-fails. OPTIONAL: since
@@ -44,13 +63,13 @@ LLM_FALLBACK_ENABLED = os.getenv("LLM_FALLBACK", "true").strip().lower() == "tru
 # Circuit breaker: once Groq's LLM hard-fails, skip it for this long so every
 # later LLM call in the run goes straight to Cerebras instead of paying the
 # retry-sleep tax per call. After the cooldown, Groq is probed again.
-LLM_CIRCUIT_BREAK_SECONDS = int(os.getenv("LLM_CIRCUIT_BREAK_SECONDS", "300"))
+LLM_CIRCUIT_BREAK_SECONDS = _env_int("LLM_CIRCUIT_BREAK_SECONDS", "300")
 
 # Groq's audio transcription endpoint caps free-tier uploads at ~25 MiB per
 # request. Audio is downmixed to 32 kbps mono mp3 (~14 MB/hour); anything
 # that still exceeds the cap gets chunked before upload.
-GROQ_MAX_AUDIO_BYTES = int(os.getenv("GROQ_MAX_AUDIO_BYTES", str(24 * 1024 * 1024)))
-AUDIO_CHUNK_SECONDS = int(os.getenv("AUDIO_CHUNK_SECONDS", "600"))  # 10-min chunks
+GROQ_MAX_AUDIO_BYTES = _env_int("GROQ_MAX_AUDIO_BYTES", 24 * 1024 * 1024)
+AUDIO_CHUNK_SECONDS = _env_int("AUDIO_CHUNK_SECONDS", "600")  # 10-min chunks
 
 # --------------------------------------------------------------------------
 # Local storage / rendering
@@ -72,7 +91,7 @@ LOCAL_WHISPER_COMPUTE = os.getenv("LOCAL_WHISPER_COMPUTE", "").strip()     # "" 
 WHISPER_FALLBACK_ENABLED = os.getenv("WHISPER_FALLBACK", "true").strip().lower() == "true"
 # Circuit breaker (same idea as the LLM side): after a Groq Whisper failure,
 # skip Groq for this long and transcribe locally instead of paying retry-sleep.
-WHISPER_CIRCUIT_BREAK_SECONDS = int(os.getenv("WHISPER_CIRCUIT_BREAK_SECONDS", "300"))
+WHISPER_CIRCUIT_BREAK_SECONDS = _env_int("WHISPER_CIRCUIT_BREAK_SECONDS", "300")
 
 # ---------------------------------------------------------------------------
 # Local LLM — the DOOMSDAY tier-3 (zero keys, zero accounts, zero internet-API)
@@ -86,9 +105,9 @@ LOCAL_LLM_ENABLED = os.getenv("LOCAL_LLM", "true").strip().lower() == "true"
 LOCAL_LLM_REPO = os.getenv("LOCAL_LLM_REPO", "bartowski/Qwen2.5-3B-Instruct-GGUF").strip()
 LOCAL_LLM_FILE = os.getenv("LOCAL_LLM_FILE", "Qwen2.5-3B-Instruct-Q4_K_M.gguf").strip()
 LOCAL_LLM_DIR = os.getenv("LOCAL_LLM_DIR", "models").strip()
-LOCAL_LLM_CTX = int(os.getenv("LOCAL_LLM_CTX", "16384"))
-LOCAL_LLM_THREADS = int(os.getenv("LOCAL_LLM_THREADS", "0"))       # 0 = library auto
-LOCAL_LLM_MAX_TOKENS = int(os.getenv("LOCAL_LLM_MAX_TOKENS", "2048"))
+LOCAL_LLM_CTX = _env_int("LOCAL_LLM_CTX", "16384")
+LOCAL_LLM_THREADS = _env_int("LOCAL_LLM_THREADS", "0")       # 0 = library auto
+LOCAL_LLM_MAX_TOKENS = _env_int("LOCAL_LLM_MAX_TOKENS", "2048")
 
 # ---------------------------------------------------------------------------
 # Provider pinning (100%-local sovereignty mode)
@@ -112,8 +131,8 @@ LLM_LOCAL_PINNED = LLM_PROVIDER == "local"
 TREND_CONTEXT_ENABLED = os.getenv("TREND_CONTEXT", "true").strip().lower() == "true"
 CAMPAIGN_NICHE = os.getenv("CAMPAIGN_NICHE", "").strip()           # e.g. "ai startup podcast"
 TRENDS_GEO = os.getenv("TRENDS_GEO", "IN").strip()                 # Google Trends geo
-TREND_CACHE_HOURS = int(os.getenv("TREND_CACHE_HOURS", "24"))
-TREND_MAX_ITEMS = int(os.getenv("TREND_MAX_ITEMS", "10"))
+TREND_CACHE_HOURS = _env_int("TREND_CACHE_HOURS", "24")
+TREND_MAX_ITEMS = _env_int("TREND_MAX_ITEMS", "10")
 
 # ---------------------------------------------------------------------------
 # Channel feedback loop (Phase-2 Fix 3A) — OPTIONAL, off until OAuth is set.
@@ -126,8 +145,8 @@ FEEDBACK_ENABLED = os.getenv("FEEDBACK", "true").strip().lower() == "true"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "").strip()
-FEEDBACK_MIN_POSTS = int(os.getenv("FEEDBACK_MIN_POSTS", "5"))
-FEEDBACK_MIN_AGE_HOURS = int(os.getenv("FEEDBACK_MIN_AGE_HOURS", "48"))
+FEEDBACK_MIN_POSTS = _env_int("FEEDBACK_MIN_POSTS", "5")
+FEEDBACK_MIN_AGE_HOURS = _env_int("FEEDBACK_MIN_AGE_HOURS", "48")
 
 # ---------------------------------------------------------------------------
 # YouTube auto-upload (Phase-3 Fix 4A) — OFF by default (dry-run philosophy:
@@ -138,12 +157,12 @@ FEEDBACK_MIN_AGE_HOURS = int(os.getenv("FEEDBACK_MIN_AGE_HOURS", "48"))
 # hard daily ceiling plus a per-run cap; everything else waits in the queue.
 # ---------------------------------------------------------------------------
 UPLOAD_ENABLED = os.getenv("UPLOAD_ENABLED", "false").strip().lower() == "true"
-UPLOAD_MAX_PER_RUN = int(os.getenv("UPLOAD_MAX_PER_RUN", "3"))
+UPLOAD_MAX_PER_RUN = _env_int("UPLOAD_MAX_PER_RUN", "3")
 # Safe ladder: "private" by default — flip to "public" deliberately when ready.
 YT_PRIVACY = os.getenv("YT_PRIVACY", "private").strip()           # private/unlisted/public
 YT_CATEGORY_ID = os.getenv("YT_CATEGORY_ID", "22").strip()        # 22 = People & Blogs
-UPLOAD_DAILY_CAP = int(os.getenv("UPLOAD_DAILY_CAP", "6"))        # ~6 × 1600 = 9,600 units
-UPLOAD_MAX_ATTEMPTS = int(os.getenv("UPLOAD_MAX_ATTEMPTS", "3"))  # queue 3-strike, same ethos
+UPLOAD_DAILY_CAP = _env_int("UPLOAD_DAILY_CAP", "6")        # ~6 × 1600 = 9,600 units
+UPLOAD_MAX_ATTEMPTS = _env_int("UPLOAD_MAX_ATTEMPTS", "3")  # queue 3-strike, same ethos
 
 # ---------------------------------------------------------------------------
 # Instagram auto-upload + IG insights (Phase-4 Fix 4B/3B) — OFF by default.
@@ -160,10 +179,10 @@ UPLOAD_MAX_ATTEMPTS = int(os.getenv("UPLOAD_MAX_ATTEMPTS", "3"))  # queue 3-stri
 IG_UPLOAD_ENABLED = os.getenv("IG_UPLOAD_ENABLED", "false").strip().lower() == "true"
 IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "").strip()        # long-lived seed token
 IG_USER_ID = os.getenv("IG_USER_ID", "").strip()                  # 1784… IG business-account id
-IG_UPLOAD_MAX_PER_RUN = int(os.getenv("IG_UPLOAD_MAX_PER_RUN", "3"))
-IG_MAX_ATTEMPTS = int(os.getenv("IG_MAX_ATTEMPTS", "3"))
-IG_CONTAINER_POLL_SECONDS = int(os.getenv("IG_CONTAINER_POLL_SECONDS", "10"))
-IG_CONTAINER_TIMEOUT_SECONDS = int(os.getenv("IG_CONTAINER_TIMEOUT_SECONDS", "600"))
+IG_UPLOAD_MAX_PER_RUN = _env_int("IG_UPLOAD_MAX_PER_RUN", "3")
+IG_MAX_ATTEMPTS = _env_int("IG_MAX_ATTEMPTS", "3")
+IG_CONTAINER_POLL_SECONDS = _env_int("IG_CONTAINER_POLL_SECONDS", "10")
+IG_CONTAINER_TIMEOUT_SECONDS = _env_int("IG_CONTAINER_TIMEOUT_SECONDS", "600")
 IG_UPLOAD_STAGING_TAG = os.getenv("IG_UPLOAD_STAGING_TAG", "media-staging")
 # Optional but recommended: the FB app's own id/secret — needed ONLY for the
 # rolling 60-day token refresh (uploads/insights themselves use the user

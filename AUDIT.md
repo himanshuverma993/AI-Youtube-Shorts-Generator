@@ -35,3 +35,23 @@ without repo activity — re-enable from the Actions tab if the 4×/day cron eve
 stops. IG staging requires the repo to be PUBLIC (documented). Test-mode
 Google OAuth apps expire refresh tokens after 7 days — publish the consent
 screen (unverified is fine) for a durable token.
+
+---
+
+## Second pass — perfection sweep (2026-09-28, same day)
+
+The operator ordered zero remaining gaps, so every INFO/⚪ item that survived
+pass 1 was eliminated too. Six more hardening fixes, each battery-verified:
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| P1 | 🟡 | A garbage numeric env (`TREND_CACHE_HOURS="abc"` etc.) crashed the WHOLE system at `import config` | All 20 numeric envs now via `_env_int`/`_env_float` — warn + typed default, import can never die |
+| P2 | ⚪ | With 5–6 measured posts, TOP-3 and BOTTOM-3 lists overlapped (same post praised AND criticized) | Bottom list now excludes top entries disjointly |
+| P3 | 🟡 | yt-dlp occasionally yields non-int `views` → `:,` format crash in trend block | Defensive int-parse, falls back to no-view text |
+| P4 | ⚪ | Campaign timestamp printed an empty timezone on Linux | Literal `UTC` now |
+| P5 | ⚪ | IG caption dedupe treated `#money,` (trailing comma) as a different tag → duplicates | Dedupe is punctuation-tolerant both ways |
+| P6 | ⚪ | `dropped_missing_file` wasn't disclosed in the campaign summary line | Both drain summaries append it when non-zero |
+
+Battery: P1–P6 green (typed fallback incl. arithmetic invariants; subprocess
+banner + drain assertions); regression sweep re-confirms pinned-local
+zero-cloud and full compile.

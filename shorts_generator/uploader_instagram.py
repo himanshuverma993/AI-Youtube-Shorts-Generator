@@ -214,10 +214,12 @@ def _delete_asset(asset_id: int, release: Dict) -> None:
 # ---------------------------------------------------------------------------
 def _build_ig_caption(meta: Dict) -> str:
     """Caption + hashtag line, deduped at TAG level (a tag the caption already
-    contains — e.g. FTC's #ad #sponsored — is never double-printed)."""
+    contains — e.g. FTC's #ad #sponsored — is never double-printed; trailing
+    punctuation like '#money,' still counts as present)."""
     caption = (meta.get("caption") or "").strip()
-    present = set(caption.split())
-    missing = [t for t in (meta.get("hashtags") or []) if str(t).strip() and t not in present]
+    present = {tok.rstrip(",.;:!\"'") for tok in caption.split()}
+    missing = [t for t in (meta.get("hashtags") or [])
+               if str(t).strip() and str(t).rstrip(",.;:!\"'") not in present]
     if missing:
         caption = f"{caption}\n\n{' '.join(missing)}".strip()
     return caption

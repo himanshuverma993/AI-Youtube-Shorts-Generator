@@ -112,7 +112,8 @@ def main() -> int:
             if u not in processed and attempts.get(u, 0) < MAX_FAILED_ATTEMPTS]
 
     print("=" * 72, flush=True)
-    print(f"[campaign] {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.gmtime())}", flush=True)
+    # time.gmtime() + %Z prints an EMPTY zone on Linux — say UTC explicitly.
+    print(f"[campaign] {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC", flush=True)
     print(f"[campaign] urls file: {args.urls_file} ({len(urls)} total, {len(processed)} done, "
           f"{len(skipped)} skipped after {MAX_FAILED_ATTEMPTS} strikes, {len(todo)} to do)", flush=True)
     for u in skipped:
@@ -240,15 +241,19 @@ def main() -> int:
         from shorts_generator.uploader_youtube import process_upload_queue, uploads_configured
         if uploads_configured():
             uploads_summary = process_upload_queue()
+            dropped = uploads_summary.get("dropped_missing_file", 0)
             print(f"[campaign] uploads — {uploads_summary['uploaded']} posted, "
                   f"{uploads_summary['queued']} still queued, "
-                  f"{uploads_summary['failed_attempts']} failed attempt(s)", flush=True)
+                  f"{uploads_summary['failed_attempts']} failed attempt(s)"
+                  + (f", {dropped} dropped (clip files gone)" if dropped else ""), flush=True)
         from shorts_generator.uploader_instagram import ig_uploads_configured, process_ig_upload_queue
         if ig_uploads_configured():
             ig_summary = process_ig_upload_queue()
+            ig_dropped = ig_summary.get("dropped_missing_file", 0)
             print(f"[campaign] ig uploads — {ig_summary['uploaded']} posted, "
                   f"{ig_summary['queued']} still queued, "
-                  f"{ig_summary['failed_attempts']} failed attempt(s)", flush=True)
+                  f"{ig_summary['failed_attempts']} failed attempt(s)"
+                  + (f", {ig_dropped} dropped (clip files gone)" if ig_dropped else ""), flush=True)
     except Exception as ue:
         print(f"[campaign] ⚠ upload step skipped ({ue})", flush=True)
 
