@@ -1,313 +1,154 @@
-# AI YouTube Shorts Generator
+# AI YouTube Shorts Generator — $0-Cost Groq Edition
 
-[![Powered by MuAPI](https://img.shields.io/badge/Powered%20by-MuAPI-6366f1?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0tMSAxNHYtNGgtMnYtMmg0djZoLTJ6bTAtOFY2aDJ2MmgtMnoiLz48L3N2Zz4=)](https://muapi.ai?utm_source=github&utm_medium=badge&utm_campaign=ai-youtube-shorts-generator)
+**The open-source alternative to Opus Clip, Vidyo.ai, Klap, SubMagic, 2short.ai, and other AI clipping tools.** Drop in any long-form YouTube video and get back ranked, viral-ready 9:16 shorts — at **zero recurring cost**, with no per-clip credits, no watermarks, and full control over the highlight algorithm.
 
+This fork is stripped of every paid/closed API dependency and wired to run **directly on free GitHub Actions runners** with a **free Groq API key** — no server, no credit card:
 
-**The open-source alternative to Opus Clip, Vidyo.ai, Klap, SubMagic, 2short.ai, and other AI clipping tools.** Drop in any long-form YouTube video and get back ranked, viral-ready 9:16 shorts — for free, with no per-clip credits, no watermarks, and full control over the highlight algorithm.
+| Stage | Tool | Cost |
+|---|---|---|
+| Source download | `yt-dlp` | free |
+| Transcription | **Groq** `whisper-large-v3-turbo` → **local faster-whisper** | free tier → $0 CPU |
+| Highlight ranking | **Groq** `llama-3.3-70b-versatile` → **Cerebras** → **local llama.cpp 3B** | free → free → $0 CPU |
+| Metadata + hashtags | **Groq** Llama → **Cerebras** → **local llama.cpp 3B** | free → free → $0 CPU |
+| Vertical reframe | `ffmpeg` + OpenCV face tracking | free, local |
+| FTC disclosure | `#ad #sponsored` appended **in code** to every description | — |
 
-Built for creators, agencies, and developers who don't want to pay $20–$300/month or be capped on minutes processed. Uses GPT-class LLM highlight detection and Whisper transcription to extract the most viral-worthy moments and auto-crop them vertically for TikTok, Reels, and Shorts.
-
-<p align="center"><a href="https://www.youtube.com/watch?v=kT1CO4BYV3A"><img src="https://i.ytimg.com/vi/kT1CO4BYV3A/maxresdefault.jpg" width="720"></a></p>
-<p align="center"><a href="https://www.youtube.com/watch?v=kT1CO4BYV3A"><b>▶ Watch: Free Unlimited AI Image Generator (Truly no limits, Open Source, No Watermark) </b></a></p>
-
-> **Building your own Opus Clip–style SaaS?** Skip the infra and ship on the same APIs that power this repo:
-> - [AI Clipping API](https://muapi.ai/playground/ai-clipping?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) — end-to-end clip selection + render
-> - [Auto-Crop API](https://muapi.ai/playground/autocrop?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) — vertical reframing only
+No OpenAI, Gemini, or MuAPI keys are used anywhere. **Doomsday-proof by design:** every AI stage ends in a local CPU tier, so the pipeline keeps producing clips even with *zero working API keys* — Groq dead, Cerebras dead, both dead, free tiers cancelled — the run degrades gracefully (slower, ~3–8 min per LLM call on the runner's 4 CPU cores) but never stops. Toggle with `LOCAL_LLM=false` / `WHISPER_FALLBACK=false` if you prefer hard failure over slow survival.
 
 ![longshorts](https://github.com/user-attachments/assets/3f5d1abf-bf3b-475f-8abf-5e253003453a)
 
-<p align="center">
-  <a href="https://github.com/Anil-matcha/awesome-generative-ai-apps">
-    <img src="https://img.shields.io/badge/Part%20of-Awesome%20Generative%20AI%20Apps-FFD700?style=for-the-badge&logo=github&logoColor=black" alt="Awesome Generative AI Apps">
-  </a>
-</p>
-
-> 🎨 **[Explore 50+ more open-source AI apps →](https://github.com/Anil-matcha/awesome-generative-ai-apps)**
-
-## Why Use This Instead of Opus Clip / Vidyo.ai / Klap?
-
-| | This repo | Opus Clip / Vidyo.ai / Klap / SubMagic |
-|---|---|---|
-| **Price** | Free + open source (pay only for API usage) | $20–$300/month subscriptions |
-| **Per-clip credits** | None — process unlimited videos | Monthly minute caps, overage fees |
-| **Watermarks** | Never | On free tiers |
-| **Highlight algorithm** | Fully editable virality framework | Black box |
-| **Output format** | Any aspect ratio, any resolution | Locked presets |
-| **Batch processing** | `xargs` an entire URL list | Manual upload one-by-one |
-| **JSON / API output** | Built-in (`--output-json`) | Limited or paid tier only |
-| **Self-hostable** | Yes — runs on your machine or server | SaaS only, your videos sit on their servers |
-| **White-label / embeddable** | Yes — MIT licensed, import as Python lib | No |
-
 ## Features
 
-- **🎬 YouTube In, Vertical Out**: Hand it any YouTube URL — get back N viral-ready 9:16 mp4s
-- **🔀 Two Modes — API (fast) or Local (offline)**: Default `--mode api` uses MuAPI for download/transcription/cropping; `--mode local` runs entirely on your machine with `yt-dlp`, `faster-whisper`, and `ffmpeg`/`opencv`, and lets you pick OpenAI or Gemini for highlight ranking
-- **🤖 Virality-Aware Highlight Selection**: Clips ranked on hooks, emotional peaks, opinion bombs, revelation moments, conflict, quotable lines, story peaks, and practical value — not just generic "interesting"
-- **📈 Score + Hook + Reason for Every Clip**: Each highlight comes with a viral score, an opening hook line, and a one-sentence explanation of why it works
-- **🎤 Whisper Transcription, Your Choice**: Cloud (`/openai-whisper` via MuAPI) or local (`faster-whisper`, CPU or CUDA) — same downstream output shape
-- **🧩 Long-Video Aware**: Videos over 30 minutes are auto-chunked with overlap so nothing gets missed
-- **♻️ Smart Dedupe**: Overlapping highlights are collapsed by score so you never get two near-duplicate clips
-- **🎯 Smart Vertical Crop**: API mode uses MuAPI's auto-crop; local mode runs OpenCV face tracking with motion smoothing
-- **📱 Any Aspect Ratio**: 9:16 for TikTok/Reels/Shorts, 1:1 for square, anything else by flag
-- **🧰 CLI + Python Library**: Use it from the shell or import `generate_shorts(...)` into your own pipeline
-- **📦 JSON Output**: `--output-json` dumps the full result (transcript + every candidate highlight + final clip URLs/paths) for downstream automation
+- **🎬 YouTube In, Vertical Out**: any YouTube URL → N viral-ready 9:16 mp4s
+- **🆓 $0 stack**: free Groq tier for all AI calls; everything else runs on your own machine
+- **🤖 Virality-Aware Highlight Selection**: clips ranked on hooks, emotional peaks, opinion bombs, revelation moments, conflict, quotable lines, story peaks, and practical value
+- **📈 Score + Hook + Reason for Every Clip**: each highlight ships with a viral score, an opening hook line, and a one-sentence rationale
+- **🧩 Long-Video Aware**: transcripts over 30 min chunk with overlap; audio over Groq's 25 MiB upload cap is auto-split into 10-minute chunks and restitched
+- **♻️ Smart Dedupe**: overlapping highlights collapse by score
+- **🎯 Face-Tracked Vertical Crop**: OpenCV Haar-cascade tracking with motion smoothing; audio muxed back with ffmpeg
+- **⚖️ FTC-Compliant Metadata**: every generated description ends with `#ad #sponsored` — appended in code, so the LLM can't drop it
+- **🪆 Headless Campaign Mode**: `campaign_runner.py` works through a URL list, records successes in a ledger, retries failures next run — and strikes out permanently-failing URLs after 3 attempts so hopeless sources stop burning quota
+- **📦 JSON Output**: `--output-json` dumps transcript + candidates + clips + metadata for downstream automation
 
-## Quick Start (No Setup)
+## Setup
 
-Don't want to self-host? The [AI Clipping API](https://muapi.ai/playground/ai-clipping?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) gives you the same Opus Clip–style pipeline as a single HTTP call — no Python, no dependencies, pay-per-clip instead of monthly subscriptions.
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg python3-venv
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env   # then paste your free key from https://console.groq.com/keys
+```
 
----
+`.env`:
 
-## Installation (Self-Hosted)
-
-### Prerequisites
-
-- Python 3.10+
-- For **API mode (default)**: a MuAPI key — powers download, transcription, highlight ranking, and clipping in a single dependency
-- For **Local mode** (`--mode local`): `ffmpeg` on your PATH and an LLM API key (`OPENAI_API_KEY` or `GEMINI_API_KEY`; only the LLM step is remote)
-
-### Steps
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator.git
-   cd AI-Youtube-Shorts-Generator
-   ```
-
-2. **Create and activate a virtual environment:**
-   ```bash
-   python3.10 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. **Install Python dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   # Only if you plan to use --mode local:
-   pip install -r requirements-local.txt
-   ```
-
-4. **Set up environment variables:**
-
-   Create a `.env` file in the project root:
-   ```bash
-   # API mode (default)
-   MUAPI_API_KEY=your_muapi_key_here
-
-   # Local mode (--mode local)
-   LLM_PROVIDER=openai         # openai or gemini
-   OPENAI_API_KEY=your_openai_key_here
-   OPENAI_MODEL=gpt-4o-mini          # optional, default gpt-4o-mini
-   GEMINI_API_KEY=your_gemini_key_here
-   GEMINI_MODEL=gemini-2.5-flash      # optional, default gemini-2.5-flash
-   LOCAL_WHISPER_MODEL=base          # tiny / base / small / medium / large-v3
-   LOCAL_WHISPER_DEVICE=auto         # auto / cpu / cuda
-   LOCAL_OUTPUT_DIR=output           # where local mp4s land
-   ```
+```bash
+GROQ_API_KEY=gsk_your_key_here
+```
 
 ## Usage
 
-### Single video (API mode — default)
+```bash
+.venv/bin/python main.py "https://www.youtube.com/watch?v=..." --num-clips 3
+```
+
+Options: `--num-clips` (default 3), `--aspect-ratio` (default `9:16`), `--format` (360/480/720/1080), `--language` (ISO-639-1 override), `--output-json`.
+
+Every short comes back with `metadata.title`, `metadata.description` (always ending `#ad #sponsored`), and `metadata.hashtags` — ready to upload.
+
+### Headless campaign mode
 
 ```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID"
+# one URL per line in campaign/urls.txt, then:
+.venv/bin/python campaign_runner.py --urls-file campaign/urls.txt --num-clips 3
 ```
 
-### Single video (Local mode — runs offline except for the LLM call)
+Processed URLs land in `campaign/processed_urls.txt`, so cron/CI reruns only pick up **new** sources; URLs that fail 3 runs in a row move to `campaign/failed_urls.txt` and are skipped. Rendered shorts go to per-video folders + JSON under `output/campaign_<timestamp>/`, with a `summary.json` for the whole run.
 
-```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID" --mode local
-```
+## Run on GitHub Actions (no server, no credit card)
 
-Local mode writes the rendered shorts to `./output/short_01.mp4`, `short_02.mp4`, … (override with `LOCAL_OUTPUT_DIR`).
+`.github/workflows/run_campaign.yml` runs the entire pipeline on free GitHub-hosted runners — nothing to rent or manage.
 
-### With options
+**Manual run:** **Actions → Run clipping campaign → Run workflow**. Paste a YouTube URL for a single clip job, or leave the URL empty to batch-process every new URL in `campaign/urls.txt`. Choose clip count, aspect ratio, and language.
 
-```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID" \
-    --mode api \
-    --num-clips 5 \
-    --aspect-ratio 9:16 \
-    --output-json result.json
-```
+**Automatic run:** 4× daily via cron (`0 0,6,12,18 * * *` — 00:00 / 06:00 / 12:00 / 18:00 UTC), batch-processing `campaign/urls.txt`. The processed-URL ledger and Whisper transcript caches persist between runs via `actions/cache`, so each cron tick only clips **new** URLs (and never re-spends Groq quota on already-transcribed sources).
 
-### Local file or path
+## Feedback loop (Phase 2 — learns from YOUR channel)
 
-In `--mode local`, you can pass a `file://` URL or a direct filesystem path and skip YouTube entirely:
+The pipeline stops guessing once it's collecting data:
 
-```bash
-python main.py "/Users/you/Videos/input.mp4" --mode local
-python main.py "file:///Users/you/Videos/input.mp4" --mode local
-```
+1. **Register what you post** (manual, works without auto-upload):
+   `python scripts/register_post.py --url <yt-link> --clip-path <short_XXX.mp4>` → row lands in `campaign/posting_registry.json` (sidecar `.youtube.json`/`.instagram.json` auto-fills title/caption/hashtags).
+2. **One-time OAuth**: `python scripts/oauth_local_setup.py` → store the 3 GitHub secrets (see secrets table). Free read-only YouTube Analytics, no billing.
+3. **Each campaign run**: rows ≥48h old get measured (retention, view velocity, likes/comments/shares/subs) → deterministic score (60% retention + 40% velocity) → **once ≥5 posts have stats**, a `CHANNEL FEEDBACK` block (top-3 vs under-performers with hooks/titles) is injected into highlight + metadata prompts. Below the threshold, or on any OAuth/API hiccup, generation continues completely unaffected.
 
-The Python API works the same way:
+## Auto-upload (Phase 3 — YouTube, quota-managed)
 
-```python
-from shorts_generator import generate_shorts
+Opt-in: `UPLOAD_ENABLED=true` + the same OAuth trio (token must carry `youtube.upload` scope — re-run `scripts/oauth_local_setup.py` if minted earlier; it now includes the scope by default).
 
-result = generate_shorts(
-    "/Users/you/Videos/input.mp4",
-    num_clips=5,
-    aspect_ratio="9:16",
-    mode="local",
-)
-for short in result["shorts"]:
-    print(short["score"], short["title"], short["clip_url"])
-```
+- **Safe ladder:** starts at `YT_PRIVACY=private` — review, then flip to `unlisted`/`public` when confident.
+- **Quota math:** `videos.insert` costs 1,600 of the free 10,000 units/day → hard ceiling `UPLOAD_DAILY_CAP=6`, per-run `UPLOAD_MAX_PER_RUN=3`. Best-scored clips go first; the rest wait in `campaign/upload_queue.json` and drain on later cron ticks (queue-only runs also process it).
+- **3-strike queue:** a clip failing `UPLOAD_MAX_ATTEMPTS` uploads is dropped with a warning instead of silently re-burning quota.
+- **Feedback closure:** every successful upload auto-registers into `posting_registry.json` — the Phase-2 loop starts measuring it with zero manual work.
+- Artifacts never change: clips keep landing in `output/…` regardless of upload state. Upload failures mark the queue item; the campaign continues.
 
-Local transcription is cached as an `.srt` file in `LOCAL_OUTPUT_DIR` using the
-video's base name. If the cache already exists and is newer than the source
-file, the app reuses it instead of running Whisper again.
+## Instagram Reels upload (Phase 4 — requirements are real, be aware)
 
-Local downloads are also cached in `LOCAL_OUTPUT_DIR` as
-`source_<youtube_id>.mp4` when the input is a YouTube URL. If that file already
-exists, the app skips `yt-dlp` and reuses the cached video.
+Opt-in: `IG_UPLOAD_ENABLED=true` + `IG_ACCESS_TOKEN` + `IG_USER_ID`. **Honest prerequisites:**
+1. IG account is **Business/Creator**, linked to a **Facebook Page**, and your **FB Developer app** (free, Development mode works for your own account — no app review needed for self-posting).
+2. The repo must be **public**: IG's container API needs a public media URL, so each clip is staged as a GitHub Release asset (`media-staging` tag) via the built-in `GITHUB_TOKEN`, then deleted after publishing.
+3. Token lifecycle: seed a **60-day long-lived** user token once; with `IG_APP_ID/SECRET` also set, the runner rolls it forward automatically (`campaign/ig_token.json`, cache-persisted). Without them, re-seed manually every ~60 days.
 
-### Batch processing
+Same rituals as YouTube: score-ranked queue (`campaign/ig_upload_queue.json`), `IG_UPLOAD_MAX_PER_RUN=3`, 3-strike drops, auto-register into the feedback registry. **IG insights** (Phase-4 3B) then measures reach/likes/comments/shares/saves — IG exposes *no retention%*, so its cohort is documented-ly scored 50% reach-velocity + 25% shares + 25% saves.
 
-Create a `urls.txt` file with one URL per line, then:
+Each run on `ubuntu-latest`:
 
-```bash
-xargs -a urls.txt -I{} python main.py "{}"
-```
+1. checks out the repo and sets up **Python 3.10**
+2. installs system deps (`sudo apt-get update && sudo apt-get install -y ffmpeg`) and `pip install -r requirements.txt`
+3. generates clips with `GROQ_API_KEY` injected from Actions secrets
+4. uploads every rendered `.mp4` **plus the metadata JSON** as a downloadable artifact: **Actions → your run → Artifacts** (kept 14 days). Manual runs land in `output/` (`short_*.mp4` + `result.json`); batch runs upload the whole `output/campaign_<timestamp>/` tree — per-video clip folders (`video_001/short_01.mp4`, …), each video's `result_NNN.json` (per-clip title, description ending in `#ad #sponsored`, hashtags), and a `summary.json`
 
-### CLI flags
+### GitHub Secrets
 
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--mode` | `api` | `api` (MuAPI, fast, no setup) or `local` (remote URL, `file://`, or local path + faster-whisper + LLM provider + ffmpeg) |
-| `--num-clips` | `3` | How many shorts to render |
-| `--aspect-ratio` | `9:16` | Any ratio; `9:16` for TikTok/Reels, `1:1` for square |
-| `--format` | `720` | Source download resolution: `360` / `480` / `720` / `1080` |
-| `--language` | auto | Force Whisper language code (e.g. `en`) |
-| `--output-json` | — | Dump the full result (transcript + all candidates) to a file |
-
-### API mode vs Local mode
-
-| Step | API mode (`--mode api`) | Local mode (`--mode local`) |
+| Secret | Required | Purpose |
 |---|---|---|
-| Download | MuAPI `/youtube-download` | `yt-dlp` for remote URLs, direct file path for local inputs |
-| Transcription | MuAPI `/openai-whisper` | `faster-whisper` (CPU or CUDA) |
-| Highlight LLM | MuAPI `gpt-5-mini` | `LLM_PROVIDER=openai` uses OpenAI (`gpt-4o-mini` by default), `LLM_PROVIDER=gemini` uses Gemini (`gemini-2.5-flash` by default) |
-| Vertical crop | MuAPI `/autocrop` | `ffmpeg` + OpenCV face tracking |
-| Output | hosted URLs | local mp4 paths |
-| Required keys | `MUAPI_API_KEY` | `OPENAI_API_KEY` or `GEMINI_API_KEY` (+ `ffmpeg` on PATH) |
+| `GROQ_API_KEY` | ✅ | free key from https://console.groq.com/keys — powers Whisper + Llama (primary) |
+| `CEREBRAS_API_KEY` | optional | https://cloud.cerebras.ai — automatic LLM failover; **(July 2026) activating a key now needs a payment method**, so leave unset on $0 setups — the local tier-3 CPU model covers outages for free |
+| `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `YT_REFRESH_TOKEN` | optional trio — feedback loop | minted once via `scripts/oauth_local_setup.py`; free read-only YouTube Analytics so the pipeline learns from **your channel's real retention/views** (Phase 2). Unset = loop silently off |
+| `IG_ACCESS_TOKEN` + `IG_USER_ID` (+ `IG_APP_ID`/`IG_APP_SECRET`) | optional — Instagram upload + insights | 60-day long-lived user token + IG business id. `IG_APP_*` enables automatic 60-day token rolling. Requires public repo (release-asset staging) |
+| `YT_COOKIES_B64` | optional | base64-encoded Netscape `cookies.txt` for yt-dlp (`base64 -w0 cookies.txt`); only needed if YouTube bot-checks the runner's datacenter IP |
 
-## How It Works
+Caveats of the free-runner tier: private repos consume the 2,000 free minutes/month (public repos are unlimited); GitHub auto-disables scheduled workflows after 60 days of repo inactivity (any push or a manual re-enable resets the clock); runners are capped at 4 h per job (hard-limited here to 120 min), so keep each batch modest.
 
-1. **Download**: Fetches the source video from YouTube
-2. **Transcribe**: MuAPI `/openai-whisper` produces a timestamped transcript (verbose_json segments)
-3. **Detect content type**: An LLM classifies the video (podcast, interview, tutorial, vlog, etc.) and density, so the prompt can be tuned per content style
-4. **Long-video chunking**: Videos > 30 min are split into 20-min overlapping chunks
-5. **Highlight ranking**: An LLM scans the transcript through a virality framework — hook moments, emotional peaks, opinion bombs, revelations, conflict, quotables, story peaks, practical value — and emits ranked candidates with scores 0–100
-6. **Dedupe**: Overlapping candidates are collapsed by score (>50% overlap → keep the higher score)
-7. **Top-N selection**: The top `--num-clips` candidates are selected
-8. **Auto-crop**: Each highlight is rendered as a vertical short at the requested aspect ratio
+## Environment variables
 
-**Output**: a list of mp4 URLs plus, for each clip, its title, viral score, hook sentence, and a one-line reason explaining why it should perform.
+| Variable | Default | Purpose |
+|---|---|---|
+| `GROQ_API_KEY` | — | free Groq key (required) |
+| `GROQ_WHISPER_MODEL` | `whisper-large-v3-turbo` | transcription model |
+| `GROQ_LLM_MODEL` | `llama-3.3-70b-versatile` | highlight/metadata model (primary) |
+| `CEREBRAS_LLM_MODEL` | `llama-3.3-70b` | fallback LLM model when Groq fails |
+| `LLM_FALLBACK` / `LLM_CIRCUIT_BREAK_SECONDS` | `true` / `300` | failover toggle + Groq skip-after-failure window |
+| `LOCAL_WHISPER_MODEL` | `small` | local Whisper fallback model: `tiny`/`base`/`small`/`medium` |
+| `WHISPER_FALLBACK` / `WHISPER_CIRCUIT_BREAK_SECONDS` | `true` / `300` | local-Whisper failover toggle + Groq-Whisper skip window |
+| `WHISPER_PROVIDER` / `LLM_PROVIDER` | `auto` / `auto` | set to `local` = pinned 100%-local mode: that backend NEVER touches a cloud API, even with keys present |
+| `CAMPAIGN_NICHE` | *(empty = trends OFF)* | niche keywords that arm the trend-context layer |
+| `TREND_CONTEXT` / `TRENDS_GEO` / `TREND_CACHE_HOURS` | `true` / `IN` / `24` | trend injection toggle, RSS geo, cache TTL |
+| `FEEDBACK` / `FEEDBACK_MIN_POSTS` / `FEEDBACK_MIN_AGE_HOURS` | `true` / `5` / `48` | feedback loop toggle + activation thresholds |
+| `UPLOAD_ENABLED` / `UPLOAD_MAX_PER_RUN` / `UPLOAD_DAILY_CAP` | `false` / `3` / `6` | auto-upload switch + per-run cap + quota ceiling |
+| `YT_PRIVACY` / `YT_CATEGORY_ID` / `UPLOAD_MAX_ATTEMPTS` | `private` / `22` / `3` | publish visibility ladder, category, queue strikes |
+| `LOCAL_LLM` / `LOCAL_LLM_CTX` / `LOCAL_LLM_MAX_TOKENS` | `true` / `16384` / `2048` | tier-3 doomsday LLM: enable + context + reply budget |
+| `LOCAL_LLM_REPO` / `LOCAL_LLM_FILE` / `LOCAL_LLM_DIR` | `bartowski/Qwen2.5-3B-Instruct-GGUF` / Q4_K_M / `models` | which GGUF + where it lives |
+| `GROQ_TIMEOUT` / `GROQ_MAX_RETRIES` | `300` / `5` | request timeout / 429-retry budget |
+| `GROQ_MAX_AUDIO_BYTES` | `25165824` (24 MiB) | upload cap before audio chunking |
+| `AUDIO_CHUNK_SECONDS` | `600` | chunk length when splitting audio |
+| `OUTPUT_DIR` | `output` | clips, caches, campaign JSON |
+| `FTC_DISCLOSURE_TAGS` | `#ad #sponsored` | appended to every description |
 
-## Output
+## Notes
 
-Console output looks like:
-
-```
-========================================================================
-Highlights:    7 candidates → kept top 3
-========================================================================
-
-#1  score=92  124.3s → 187.6s
-     title:  The one mistake that cost me $50K
-     hook:   "Nobody talks about this, but it killed my first startup..."
-     clip:   https://.../short_1.mp4
-
-#2  score=88  ...
-```
-
-`--output-json result.json` produces:
-
-```json
-{
-  "source_video_url": "...",
-  "transcript": { "duration": 1873.4, "segments": [...] },
-  "highlights": [ {...}, {...}, ... ],
-  "shorts": [
-    {
-      "title": "...",
-      "start_time": 124.3,
-      "end_time": 187.6,
-      "score": 92,
-      "hook_sentence": "...",
-      "virality_reason": "...",
-      "clip_url": "https://.../short_1.mp4"
-    }
-  ]
-}
-```
-
-## Configuration
-
-### Highlight selection criteria
-Edit `shorts_generator/highlights.py`:
-- **Virality framework**: `VIRALITY_CRITERIA` — the ranked list of signals the LLM optimizes for
-- **System prompt**: `HIGHLIGHT_SYSTEM_PROMPT` — duration sweet spot, hook rules, JSON schema
-- **Chunk size**: `CHUNK_SIZE_SECONDS` (default 1200) — chunk length for long videos
-- **Long-video threshold**: `LONG_VIDEO_THRESHOLD` (default 1800) — videos longer than this are chunked
-- **Chunk overlap**: `CHUNK_OVERLAP_SECONDS` (default 60) — overlap between chunks so cross-boundary clips aren't missed
-
-### Polling / timeout
-Edit `shorts_generator/config.py` (or set env vars):
-- `MUAPI_POLL_INTERVAL` (default 5s) — seconds between job-status polls
-- `MUAPI_POLL_TIMEOUT` (default 1800s) — give up after this long
-
-### Whisper transcription
-Audio is transcribed by MuAPI's `/openai-whisper` endpoint (server-side `whisper-1`). Pass `--language <code>` to lock the recognition to a specific language; otherwise it auto-detects.
-
-## Project Structure
-
-```
-AI-Youtube-Shorts-Generator/
-├── main.py                       CLI entry point
-├── requirements.txt              core deps (api mode)
-├── requirements-local.txt        optional deps for --mode local
-├── .env.example
-└── shorts_generator/
-    ├── config.py                 env / settings (MuAPI + local LLM + Whisper)
-    ├── muapi.py                  generic submit + poll wrapper
-    ├── downloader.py             API mode: YouTube download via MuAPI
-    ├── transcriber.py            API mode: MuAPI /openai-whisper client
-    ├── highlights.py             shared LLM virality ranking (pluggable backend)
-    ├── clipper.py                API mode: MuAPI /autocrop
-    ├── pipeline.py               mode dispatcher (api ↔ local)
-    └── local/                    --mode local backends (offline)
-        ├── downloader.py         yt-dlp download
-        ├── transcriber.py        faster-whisper transcription
-        ├── llm.py                OpenAI or Gemini client selector
-        └── clipper.py            ffmpeg cut + OpenCV vertical crop
-```
-
-## Troubleshooting
-
-### Whisper produced no segments
-The video may have no detectable speech, or it may be in a language Whisper struggles with. Try passing `--language en` (or the correct ISO-639-1 code) to skip auto-detection.
-
-### Looking for better results?
-The [AI Clipping API](https://muapi.ai/playground/ai-clipping?utm_source=github&utm_medium=readme&utm_campaign=ai-youtube-shorts-generator) uses an improved algorithm that produces higher-quality clips with better highlight detection.
-
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit a pull request.
-
-## License
-
-This project is licensed under the MIT License.
-
-## Related Projects
-
-- [awesome-vibecoded-saas](https://github.com/Anil-matcha/awesome-vibecoded-saas) — broader catalog of open-source SaaS alternatives featuring this Shorts workflow.
-- [Muapi open-source alternatives](https://muapi.ai/open-source/alternative) — compare the Shorts workflow with the paid creator tools it targets.
-- [AI Influencer Generator](https://github.com/SamurAIGPT/AI-Influencer-Generator)
-- [Text to Video AI](https://github.com/SamurAIGPT/Text-To-Video-AI)
-- [Faceless Video Generator](https://github.com/SamurAIGPT/Faceless-Video-Generator)
-- [AI B-roll Generator](https://github.com/Anil-matcha/AI-B-roll)
-- [No-code YouTube Shorts Generator](https://www.vadoo.tv/clip-youtube-video)
-- [ai-creator-academy](https://github.com/Anil-matcha/ai-creator-academy) — free curriculum teaching creators how to monetize AI-generated shorts and video content
+- Groq's free tier is rate-limited; all calls retry with the server-provided `Retry-After` plus exponential backoff. Transcripts are cached as `.srt` so reruns don't re-spend quota.
+- If Groq's **LLM** hard-fails and `CEREBRAS_API_KEY` is set, `call_llm` replays the exact same prompt on Cerebras; if Cerebras also dies (or is absent), it replays on a **local llama.cpp model** (default Qwen2.5-3B-Instruct Q4_K_M, ~1.9 GB, grammar-forced JSON so a 3B can't emit broken output). A circuit breaker per cloud skips the dead tier for the rest of the run, then re-probes it later.
+- If Groq **Whisper** hard-fails (outage / audio-seconds quota / bad key), transcription fails over to **local faster-whisper** on the runner's own CPU (`LOCAL_WHISPER_MODEL=small`, int8 ≈ 7–8 min per hour of podcast audio on 4 cores) — no key, no quota, just slower.
+- First tier-3 run downloads ~2 GB of model weights once; the workflow caches `models/` so later runs start instantly.
+- **100%-local sovereignty mode:** set `WHISPER_PROVIDER=local` and/or `LLM_PROVIDER=local` (repo Variables) and those backends bypass every cloud API entirely — no "try-then-failover", not one cloud byte. Works even with `GROQ_API_KEY` set (it just goes unused). Trade-off honesty: ~2× wall-clock per run and a 3B/whisper-small quality dip vs 70B/large-v3 — free tiers dying can't close the plant, but they also never improved the product past 'good enough'.
+- Everything runs on stock `ubuntu-latest` runners: only `ffmpeg` from apt + four pip packages.
+- `opencv-python-headless` is used (no GUI libs), so no extra system X11 packages are needed on a headless runner.

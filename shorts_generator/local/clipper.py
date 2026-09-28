@@ -10,7 +10,7 @@ import os
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
-from ..config import LOCAL_OUTPUT_DIR
+from ..config import OUTPUT_DIR
 
 
 def _ratio(aspect_ratio: str) -> float:
@@ -23,12 +23,19 @@ def _ratio(aspect_ratio: str) -> float:
 
 
 def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> str:
-    """ffmpeg -ss start -to end → re-encoded mp4 with audio."""
+    """ffmpeg fast-seek cut → re-encoded mp4 with audio.
+
+    -ss/-t are placed BEFORE -i (input seeking): ffmpeg jumps to the nearest
+    keyframe at/before the target and decodes forward — frame-accurate on any
+    modern ffmpeg when re-encoding, and 10–50x faster than output seeking on
+    long sources (which would decode from t=0 for every single clip).
+    """
+    duration = max(0.001, end - start)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
-        "-i", source_path,
         "-ss", f"{start:.3f}",
-        "-to", f"{end:.3f}",
+        "-t", f"{duration:.3f}",
+        "-i", source_path,
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
@@ -44,7 +51,7 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     except ImportError as e:
         raise RuntimeError(
             "opencv-python is required for --mode local. Install it with:\n"
-            "    pip install -r requirements-local.txt"
+            "    pip install -r requirements.txt"
         ) from e
 
     target_ratio = _ratio(aspect_ratio)
@@ -117,8 +124,13 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
         "-shortest",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
-    os.remove(silent_path)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        # Audit hygiene: the temp silent file must never be orphaned, even
+        # when the mux fails (a 30-second 720p leftover is ~10–20 MB).
+        if os.path.exists(silent_path):
+            os.remove(silent_path)
     return out_path
 
 
@@ -146,7 +158,7 @@ def crop_highlights_local(
     aspect_ratio: str = "9:16",
     out_dir: Optional[str] = None,
 ) -> List[Dict]:
-    out_dir = out_dir or LOCAL_OUTPUT_DIR
+    out_dir = out_dir or OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
     results: List[Dict] = []
     for i, h in enumerate(highlights, 1):
