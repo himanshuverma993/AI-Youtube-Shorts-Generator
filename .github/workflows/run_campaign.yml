@@ -1,0 +1,163 @@
+name: Run clipping campaign
+
+# Runs the ENTIRE pipeline on free GitHub-hosted runners — no VPS, no SSH,
+# no credit card. Rendered .mp4s + metadata JSON land in the run's Artifacts
+# panel so you can download and post them anywhere.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube URL to clip (leave empty to batch-process campaign/urls.txt)"
+        required: false
+        type: string
+      num_clips:
+        description: "Shorts to render per video"
+        required: false
+        default: "3"
+      aspect_ratio:
+        description: "Output aspect ratio"
+        required: false
+        default: "9:16"
+        type: choice
+        options:
+          - "9:16"
+          - "1:1"
+          - "4:5"
+      language:
+        description: "Force Whisper language (e.g. en); empty = auto-detect"
+        required: false
+        type: string
+  schedule:
+    - cron: '0 0,6,12,18 * * *'   # 4x/day: 00:00, 06:00, 12:00, 18:00 UTC
+
+permissions:
+  # contents:write is required ONLY when Instagram auto-upload is enabled —
+  # IG's container API needs a public media URL, so clips are staged as a
+  # GitHub Release asset in this repo (tag: media-staging) and deleted after
+  # publishing. Without IG upload enabled nothing is written back.
+  contents: write
+
+concurrency:
+  group: run-campaign
+  cancel-in-progress: false   # never let two cron runs double-process the same URLs
+
+env:
+  # secrets may not be referenced in step-level `if:` — mirror to env instead.
+  YT_COOKIES_B64: ${{ secrets.YT_COOKIES_B64 }}
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -n 1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare directories
+        run: mkdir -p output campaign
+
+      - name: Restore campaign state (ledgers + transcript caches)
+        # Keeps the 4x/day cron runs from re-processing finished URLs, from
+        # re-spending Groq Whisper quota on already-transcribed sources, and
+        # from hammering permanently-failing URLs beyond their 3 strikes.
+        uses: actions/cache@v4
+        with:
+          path: |
+            campaign/processed_urls.txt
+            campaign/failed_urls.txt
+            campaign/posting_registry.json
+            campaign/feedback_stats.json
+            campaign/upload_queue.json
+            campaign/upload_ledger.json
+            campaign/ig_upload_queue.json
+            campaign/ig_token.json
+            output/*.srt
+            output/trend_context.json
+          key: campaign-state-${{ github.run_id }}
+          restore-keys: |
+            campaign-state-
+
+      - name: Cache tier-3 local model weights (llama.cpp + faster-whisper)
+        # The doomsday backends download ~2GB of GGUF weights once; a STICKY
+        # static key means later runs reuse them instead of re-downloading.
+        # Bump the -v1 suffix if LOCAL_LLM_REPO/FILE defaults ever change.
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: local-model-weights-v1
+
+      - name: Decode optional YouTube cookies for yt-dlp
+        # Only needed if YouTube bot-checks the runner's datacenter IP.
+        if: ${{ env.YT_COOKIES_B64 != '' }}
+        run: |
+          echo "${YT_COOKIES_B64}" | base64 -d > "$RUNNER_TEMP/yt_cookies.txt"
+          echo "YTDLP_COOKIES_FILE=$RUNNER_TEMP/yt_cookies.txt" >> "$GITHUB_ENV"
+          echo "YouTube cookies decoded — yt-dlp will run authenticated."
+
+      - name: Generate clips
+        timeout-minutes: 90
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # Optional LLM failover — if unset, the pipeline runs Groq + local tier-3.
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          # Route ALL local model downloads (whisper fallback + tier-3 GGUF)
+          # into models/ so the cache block above persists them between runs.
+          HF_HOME: models/hf
+          # Optional feedback loop (Phase 2) — inactive until all 3 are set;
+          # created once via scripts/oauth_local_setup.py. FREE read-only
+          # YouTube Analytics, no billing needed.
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          # Optional Instagram upload + insights (Phase 4) — off until seeded.
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_APP_ID: ${{ secrets.IG_APP_ID }}
+          IG_APP_SECRET: ${{ secrets.IG_APP_SECRET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_URL: ${{ github.event.inputs.url }}
+          NUM_CLIPS: ${{ github.event.inputs.num_clips }}
+          ASPECT_RATIO: ${{ github.event.inputs.aspect_ratio }}
+          LANGUAGE: ${{ github.event.inputs.language }}
+        run: |
+          set -e
+          ARGS=(--num-clips "${NUM_CLIPS:-3}" --aspect-ratio "${ASPECT_RATIO:-9:16}")
+          if [ -n "${LANGUAGE:-}" ]; then
+            ARGS+=(--language "${LANGUAGE}")
+          fi
+
+          if [ -n "${INPUT_URL:-}" ]; then
+            echo "▶ Manual dispatch — clipping: ${INPUT_URL}"
+            python main.py "${INPUT_URL}" "${ARGS[@]}" --output-json output/result.json
+          else
+            echo "▶ Batch mode — processing new URLs from campaign/urls.txt"
+            python campaign_runner.py --urls-file campaign/urls.txt "${ARGS[@]}"
+          fi
+
+      - name: Upload clips + metadata JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-${{ github.run_number }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            output/short_*.mp4
+            output/result.json
+            output/campaign_*/
