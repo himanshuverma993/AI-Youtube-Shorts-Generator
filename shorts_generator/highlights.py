@@ -6,15 +6,15 @@ Logic ported from ViralVadoo's transcript_analysis/highlight_generator.py:
   - virality-criteria prompt
   - score-based dedupe with overlap suppression
 
-The LLM call is pluggable via the `llm_fn` argument; it defaults to
-:func:`groq_client.call_llm` — Groq's hosted Llama with an automatic
-Cerebras failover, so a down free tier never stops the run.
+The LLM call is pluggable via the `llm_fn` argument so the same prompts can
+drive either MuAPI (default, --mode api) or a direct local LLM client
+(--mode local).
 """
 import json
 import re
 from typing import Callable, Dict, List, Optional
 
-from .groq_client import call_llm
+from . import muapi
 
 
 LLMFn = Callable[[str], str]
@@ -27,9 +27,9 @@ Respond with JSON only: {"content_type": "...", "density": "..."}"""
 
 
 VIRALITY_CRITERIA = """
-Virality signals to prioritize (ranked by 2026 algorithm impact):
-1. SHARE-TO-DM TRIGGER (top-weighted Instagram Reels signal) — humor, relatable banter, or shocking facts with high emotional polarity; the moments a viewer immediately sends to a friend via DM ("this is literally you")
-2. INSTANT HOOK — an opening frame that is already an emotional peak, conflict, punchline, or question (beats the "Viewed vs Swiped Away" filter)
+Virality signals to prioritize (ranked by impact):
+1. HOOK MOMENTS — statements that create immediate curiosity ("The secret is...", "Nobody talks about...", "I was completely wrong about...")
+2. EMOTIONAL PEAKS — genuine surprise, laughter, anger, vulnerability, excitement; raw unscripted reactions
 3. OPINION BOMBS — strong, polarizing or counter-intuitive statements that trigger agree/disagree
 4. REVELATION MOMENTS — surprising facts, stats, or confessions that reframe how the viewer thinks
 5. CONFLICT/TENSION — disagreement, pushback, or a problem being confronted head-on
@@ -39,7 +39,7 @@ Virality signals to prioritize (ranked by 2026 algorithm impact):
 """
 
 
-HIGHLIGHT_SYSTEM_PROMPT = """You are an elite short-form video editor who has studied thousands of viral clips and reverse-engineered the 2026 YouTube Shorts and Instagram Reels ranking algorithms. You know exactly how retention ("Viewed vs Swiped Away"), completion rate (APV), and DM-shares are weighted.
+HIGHLIGHT_SYSTEM_PROMPT = """You are an elite short-form video editor who has studied thousands of viral clips on TikTok, Instagram Reels, and YouTube Shorts. You know exactly what makes viewers stop scrolling, watch to the end, and share.
 
 {virality_criteria}
 
@@ -47,10 +47,9 @@ Content type: {content_type} | Density: {density}
 
 Your task: identify the most viral-worthy highlights from the transcript.
 
-2026 RANKING RULES (MANDATORY — highlights that violate them MUST be rejected):
-- 3-SECOND HOOK RULE: reject any highlight whose first 3 seconds contain silence, intro chatter, or slow build-up. The first frame MUST open on an immediate emotional peak, conflict, punchline, or question. Clips that fail the "Viewed vs Swiped Away" filter get zero distribution, no matter how good the rest is.
-- HIGH-SHARE FACTOR (Meta DM trigger): prioritize segments with high emotional polarity — humor, relatable banter, shocking facts — that viewers are mathematically likely to share via direct message. DM-shares are the single most valuable ranking boost.
-- DURATION LOCK: every highlight MUST be strictly between 20 and 40 seconds (end_time − start_time ≥ 20.0 and ≤ 40.0). Do not return anything shorter or longer. This window maximizes completion rate (>90% APV), which the algorithm weights above raw watch time.
+Rules:
+- Every highlight must open with a strong HOOK — a line that grabs attention within the first 3 seconds
+- Duration sweet spot: 45-90 seconds. Go shorter (20-44s) only for a perfect standalone one-liner. Go longer (91-180s) only when a story arc needs full context to land
 - Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
 - Clips must not overlap significantly with each other
 - Score 0-100 on viral potential (not general quality)
@@ -65,19 +64,39 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 CHUNK_SIZE_SECONDS = 1200       # 20-min chunks for long videos
 LONG_VIDEO_THRESHOLD = 1800     # chunk videos longer than 30 min
 CHUNK_OVERLAP_SECONDS = 60
+GPT_CALL_TIMEOUT_SECONDS = 300  # cap LLM polls at 5 min — a wedged call should fail fast
 MAX_HIGHLIGHT_API_ATTEMPTS = 3
 
-# 2026 DURATION LOCK (see HIGHLIGHT_SYSTEM_PROMPT): clips must be 20–40s.
-# The prompt instructs the model, and _sanitize_highlights ENFORCES it in
-# code — a clip outside the window is rejected (0.25s tolerance absorbs
-# transcript timestamp jitter around the edges).
-MIN_CLIP_SECONDS = 20.0
-MAX_CLIP_SECONDS = 40.0
-DURATION_TOLERANCE = 0.25
+
+def call_muapi_llm(prompt: str) -> str:
+    """Default LLM backend: MuAPI gpt-5-mini."""
+    result = muapi.run(
+        "gpt-5-mini",
+        {"prompt": prompt},
+        label="gpt-5-mini",
+        timeout=GPT_CALL_TIMEOUT_SECONDS,
+    )
+
+    outputs = result.get("outputs")
+    if isinstance(outputs, list) and outputs and isinstance(outputs[0], str) and outputs[0].strip():
+        return outputs[0]
+
+    for key in ("output", "text", "response", "result", "content"):
+        v = result.get(key)
+        if isinstance(v, str) and v.strip():
+            return v
+        if isinstance(v, dict):
+            inner = v.get("text") or v.get("content")
+            if isinstance(inner, str) and inner.strip():
+                return inner
+        if isinstance(v, list) and v and isinstance(v[0], str):
+            return v[0]
+
+    raise RuntimeError(f"Could not extract gpt-5-mini text from response: {result}")
 
 
 def _parse_json_loose(raw: str) -> Dict:
-    """Models sometimes wrap JSON in markdown fences — strip and parse."""
+    """gpt-5-4 sometimes wraps JSON in markdown fences — strip and parse."""
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -106,12 +125,7 @@ def _coerce_int(value: object, default: int = 0) -> int:
 
 
 def _sanitize_highlights(raw_highlights: object, duration: float) -> List[Dict]:
-    """Normalize model output into the expected shape; skip invalid entries.
-
-    Enforces the 2026 duration lock in code: a candidate whose (clamped)
-    length falls outside 20–40s (±0.25s jitter tolerance) is dropped, so a
-    non-compliant model can't slip long clips through the pipeline.
-    """
+    """Normalize model output into the expected shape; skip invalid entries."""
     if not isinstance(raw_highlights, list):
         return []
 
@@ -132,12 +146,6 @@ def _sanitize_highlights(raw_highlights: object, duration: float) -> List[Dict]:
             if end <= start:
                 continue
 
-        clip_dur = end - start
-        if clip_dur < MIN_CLIP_SECONDS - DURATION_TOLERANCE:
-            continue  # too short — violates the 20s floor
-        if clip_dur > MAX_CLIP_SECONDS + DURATION_TOLERANCE:
-            continue  # too long — violates the 40s ceiling
-
         cleaned.append(
             {
                 "title": str(item.get("title") or "Untitled Highlight").strip(),
@@ -152,7 +160,7 @@ def _sanitize_highlights(raw_highlights: object, duration: float) -> List[Dict]:
     return cleaned
 
 
-def detect_content_type(transcript: Dict, llm_fn: LLMFn = call_llm) -> Dict[str, str]:
+def detect_content_type(transcript: Dict, llm_fn: LLMFn = call_muapi_llm) -> Dict[str, str]:
     segments = transcript.get("segments", [])
     sample = " ".join(s["text"] for s in segments[:25])[:3000]
     prompt = f"{CONTENT_TYPE_PROMPT}\n\nTranscript sample:\n{sample}"
@@ -195,28 +203,20 @@ def call_highlight_api(
     duration: float,
     num_clips: int,
     is_chunk: bool = False,
-    llm_fn: LLMFn = call_llm,
-    context_block: Optional[str] = None,
+    llm_fn: LLMFn = call_muapi_llm,
 ) -> Dict:
     # Ask for ~2× the user's target so dedupe has headroom, but cap so the model
-    # doesn't have to generate a huge JSON payload (which risks timeouts).
-    # Headroom estimate uses 40s — the ceiling of the 20–40s duration lock.
+    # doesn't have to generate a huge JSON payload (which times out gpt-5-mini).
     target = max(num_clips * 2, 5)
-    natural_max = max(2 if is_chunk else 3, int(duration / 40))
-    # Never demand more non-overlapping 20s clips than can physically exist in
-    # this window — e.g. a 45s source can hold at most 2, not "at least 3".
-    physical_max = max(1, int(duration // MIN_CLIP_SECONDS))
-    min_clips = min(target, natural_max, physical_max, 8)
+    natural_max = max(2 if is_chunk else 3, int(duration / 90))
+    min_clips = min(target, natural_max, 8)
     system = HIGHLIGHT_SYSTEM_PROMPT.format(
         virality_criteria=VIRALITY_CRITERIA,
         content_type=content_info.get("content_type", "other"),
         density=content_info.get("density", "medium"),
         num_clips_instruction=f"Generate at least {min_clips} highlights",
     )
-    # Optional Phase-1 Fix 2 trend block: framing bias only, injected between
-    # the rules and the transcript — NEVER touching the transcript itself.
-    trend_block = f"{context_block.strip()}\n\n" if context_block and context_block.strip() else ""
-    base_prompt = f"{system}\n\n{trend_block}Transcript:\n{transcript_text}"
+    base_prompt = f"{system}\n\nTranscript:\n{transcript_text}"
     prompt = base_prompt
     last_error = "unknown"
 
@@ -273,16 +273,13 @@ def get_highlights(
     transcript: Dict,
     num_clips: int = 3,
     llm_fn: Optional[LLMFn] = None,
-    context_block: Optional[str] = None,
 ) -> Dict:
     """Main entry point — returns {highlights: [...]} sorted by score.
 
-    `llm_fn` swaps the underlying LLM. Defaults to :func:`call_llm`
-    (Groq with automatic Cerebras failover); pass a different callable to
-    use another backend entirely. `context_block` (optional prebuilt block
-    from trends.get_trend_block) is injected as framing-bias-only guidance.
+    `llm_fn` swaps the underlying LLM. Defaults to MuAPI gpt-5-mini; local
+    mode passes in a local LLM-backed callable.
     """
-    llm_fn = llm_fn or call_llm
+    llm_fn = llm_fn or call_muapi_llm
     duration = transcript.get("duration", 0)
     content_info = detect_content_type(transcript, llm_fn=llm_fn)
     print(f"[highlights] content={content_info.get('content_type')} density={content_info.get('density')} duration={duration:.0f}s", flush=True)
@@ -293,22 +290,9 @@ def get_highlights(
         all_highlights: List[Dict] = []
         for i, chunk in enumerate(chunks):
             offset = chunk.get("_offset", 0)
-            # Show the model CHUNK-RELATIVE timestamps. The segment times in
-            # `chunks` are absolute (t+offset in the source), but the duration
-            # window _sanitize_highlights enforces is chunk-relative — feeding
-            # absolute times made every non-first chunk clamp to end<=start
-            # and get DROPPED (audit F3: only chunk-1 clips ever survived on
-            # videos longer than LONG_VIDEO_THRESHOLD).
-            rel_chunk = {
-                **chunk,
-                "segments": [
-                    {**s, "start": float(s["start"]) - offset, "end": float(s["end"]) - offset}
-                    for s in chunk["segments"]
-                ],
-            }
-            text = build_transcript_text(rel_chunk)
+            text = build_transcript_text(chunk)
             print(f"[highlights] chunk {i + 1}/{len(chunks)} (offset {offset:.0f}s)", flush=True)
-            result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn, context_block=context_block)
+            result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn)
             for h in result.get("highlights", []):
                 h["start_time"] = float(h["start_time"]) + offset
                 h["end_time"] = float(h["end_time"]) + offset
@@ -316,7 +300,7 @@ def get_highlights(
         highlights = dedupe_highlights(all_highlights)
     else:
         text = build_transcript_text(transcript)
-        result = call_highlight_api(text, content_info, duration, num_clips=num_clips, llm_fn=llm_fn, context_block=context_block)
+        result = call_highlight_api(text, content_info, duration, num_clips=num_clips, llm_fn=llm_fn)
         highlights = dedupe_highlights(result.get("highlights", []))
 
     return {"highlights": highlights}

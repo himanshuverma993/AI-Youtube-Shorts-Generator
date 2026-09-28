@@ -4,19 +4,5 @@ __pycache__/
 .venv/
 venv/
 output/
-logs/
 *.mp4
 .DS_Store
-# Runner-side campaign state (persisted via workflow cache, not in git)
-campaign/processed_urls.txt
-campaign/failed_urls.txt
-campaign/posting_registry.json
-campaign/feedback_stats.json
-campaign/upload_queue.json
-campaign/upload_ledger.json
-campaign/ig_upload_queue.json
-campaign/ig_token.json
-
-# Local model weights (tier-3 LLM + whisper) and run artifacts
-models/
-output/

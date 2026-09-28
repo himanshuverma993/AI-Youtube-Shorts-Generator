@@ -3,8 +3,6 @@
 Usage:
     python main.py "https://www.youtube.com/watch?v=..." \
         --num-clips 3 --aspect-ratio 9:16
-
-Stack: yt-dlp + Groq Whisper + Groq Llama + ffmpeg/OpenCV — $0 cost.
 """
 import argparse
 import json
@@ -21,8 +19,14 @@ from shorts_generator import generate_shorts
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="AI YouTube Shorts Generator (free Groq stack)")
+    parser = argparse.ArgumentParser(description="AI YouTube Shorts Generator")
     parser.add_argument("url", help="YouTube URL, file:// URL, or local file path")
+    parser.add_argument(
+        "--mode",
+        choices=["api", "local"],
+        default="api",
+        help="api (default, MuAPI) or local (remote URL, file://, or local path + faster-whisper + LLM provider + ffmpeg).",
+    )
     parser.add_argument("--num-clips", type=int, default=3, help="How many shorts to render (default: 3)")
     parser.add_argument("--aspect-ratio", default="9:16", help="Output aspect ratio (default: 9:16)")
     parser.add_argument("--format", default="720", help="Source download resolution: 360 / 480 / 720 / 1080 (default: 720)")
@@ -37,12 +41,14 @@ def main() -> int:
             aspect_ratio=args.aspect_ratio,
             download_format=args.format,
             language=args.language,
+            mode=args.mode,
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)
         return 1
 
     print("\n" + "=" * 72)
+    print(f"Mode:          {result.get('mode', args.mode)}")
     print(f"Source video:  {result['source_video_url']}")
     print(f"Highlights:    {len(result['highlights'])} candidates → kept top {len(result['shorts'])}")
     print("=" * 72)
@@ -50,17 +56,6 @@ def main() -> int:
         print(f"\n#{i}  score={s.get('score')}  {s.get('start_time'):.1f}s → {s.get('end_time'):.1f}s")
         print(f"     title:  {s.get('title')}")
         print(f"     hook:   {s.get('hook_sentence')}")
-        meta = s.get("metadata") or {}
-        if meta:
-            # Platform-split payloads (Phase 1): predecessor keys
-            # title/description/hashtags don't exist at meta level (audit F2).
-            yt = meta.get("youtube") or {}
-            ig = meta.get("instagram") or {}
-            print(f"     yt-title:       {yt.get('title')}")
-            print(f"     yt-description: {yt.get('description')}")
-            print(f"     yt-hashtags:    {' '.join(yt.get('hashtags') or [])}")
-            ig_first = (ig.get("caption") or "").splitlines()
-            print(f"     ig-caption:     {ig_first[0] if ig_first else ''}")
         if s.get("clip_url"):
             print(f"     clip:   {s['clip_url']}")
         else:

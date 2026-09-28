@@ -1,6 +1,6 @@
-"""Local backends — everything here runs on your own machine (no paid APIs).
+"""Local-mode backends — no MuAPI calls, runs on your machine.
 
-The heavy lifting (downloading, cutting, vertical reframing) is done by
-yt-dlp + ffmpeg + OpenCV; all AI calls live in the top-level modules and go
-through the free Groq tier.
+Used when the pipeline is invoked with mode="local". Requires the optional
+deps in requirements-local.txt (yt-dlp, faster-whisper, openai, google-genai,
+opencv, moviepy) plus an LLM API key for highlight ranking.
 """

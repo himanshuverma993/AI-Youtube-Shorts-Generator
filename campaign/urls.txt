@@ -1,8 +1,0 @@
-# Clipping campaign source list — one YouTube URL per line.
-# Lines starting with '#' and blank lines are ignored.
-# campaign_runner.py processes each URL once and records it in
-# campaign/processed_urls.txt (persisted between GitHub Actions runs via
-# the workflow cache), so scheduled reruns only pick up newly added URLs.
-#
-# Add your URLs below, e.g.:
-# https://www.youtube.com/watch?v=dQw4w9WgXcQ

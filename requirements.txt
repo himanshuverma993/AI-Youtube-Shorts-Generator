@@ -1,12 +1,2 @@
-# Zero-cost stack — free Groq (Whisper + Llama, primary) + free Cerebras (LLM
-# fallback) + faster-whisper (transcription fallback) + llama.cpp (tier-3
-# local LLM) — all local backends run on the runner's own CPU. Installs
-# cleanly on stock ubuntu-latest runners.
-groq>=0.11.0
-cerebras-cloud-sdk>=1.0.0
+requests>=2.31
 python-dotenv>=1.0
-yt-dlp>=2024.8.6
-opencv-python-headless>=4.8.0
-faster-whisper>=1.0.0
-huggingface-hub>=0.24.0
-llama-cpp-python>=0.2.80
