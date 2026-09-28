@@ -111,7 +111,7 @@ Each run on `ubuntu-latest`:
 | Secret | Required | Purpose |
 |---|---|---|
 | `GROQ_API_KEY` | ✅ | free key from https://console.groq.com/keys — powers Whisper + Llama (primary) |
-| `CEREBRAS_API_KEY` | recommended | free key from https://cloud.cerebras.ai (1M tokens/day, no card) — automatic LLM failover; if Groq's LLM dies mid-campaign, the run keeps going on Cerebras |
+| `CEREBRAS_API_KEY` | optional | https://cloud.cerebras.ai — automatic LLM failover; **(July 2026) activating a key now needs a payment method**, so leave unset on $0 setups — the local tier-3 CPU model covers outages for free |
 | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `YT_REFRESH_TOKEN` | optional trio — feedback loop | minted once via `scripts/oauth_local_setup.py`; free read-only YouTube Analytics so the pipeline learns from **your channel's real retention/views** (Phase 2). Unset = loop silently off |
 | `IG_ACCESS_TOKEN` + `IG_USER_ID` (+ `IG_APP_ID`/`IG_APP_SECRET`) | optional — Instagram upload + insights | 60-day long-lived user token + IG business id. `IG_APP_*` enables automatic 60-day token rolling. Requires public repo (release-asset staging) |
 | `YT_COOKIES_B64` | optional | base64-encoded Netscape `cookies.txt` for yt-dlp (`base64 -w0 cookies.txt`); only needed if YouTube bot-checks the runner's datacenter IP |

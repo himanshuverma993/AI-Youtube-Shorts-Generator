@@ -253,15 +253,20 @@ def transcribe(media_path: str, language: Optional[str] = None) -> Dict:
     """Transcribe a local media file with Groq Whisper (with .srt caching)."""
     cache_path = _transcript_cache_path(media_path)
     if cache_path.exists() and cache_path.stat().st_mtime >= os.path.getmtime(media_path):
-        cached = _load_srt_cache(cache_path)
-        if cached["segments"] and cached["duration"] > 0.0:
+        try:
+            cached = _load_srt_cache(cache_path)
+        except (OSError, ValueError):
+            # Audit F5: a .srt written by a killed process (truncated
+            # timestamps) must not crash the run — delete and re-transcribe.
+            cached = None
+        if cached and cached["segments"] and cached["duration"] > 0.0:
             print(
                 f"[transcribe] reusing cached transcript: {cache_path} "
                 f"({len(cached['segments'])} segments)",
                 flush=True,
             )
             return cached
-        print(f"[transcribe] cache empty/invalid, deleting: {cache_path}", flush=True)
+        print(f"[transcribe] cache empty/invalid/corrupt, deleting: {cache_path}", flush=True)
         cache_path.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="shorts_audio_") as tmp:

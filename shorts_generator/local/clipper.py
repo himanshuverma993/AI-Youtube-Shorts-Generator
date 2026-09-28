@@ -124,8 +124,13 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
         "-shortest",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
-    os.remove(silent_path)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        # Audit hygiene: the temp silent file must never be orphaned, even
+        # when the mux fails (a 30-second 720p leftover is ~10–20 MB).
+        if os.path.exists(silent_path):
+            os.remove(silent_path)
     return out_path
 
 

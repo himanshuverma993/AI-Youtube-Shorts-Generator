@@ -293,7 +293,20 @@ def get_highlights(
         all_highlights: List[Dict] = []
         for i, chunk in enumerate(chunks):
             offset = chunk.get("_offset", 0)
-            text = build_transcript_text(chunk)
+            # Show the model CHUNK-RELATIVE timestamps. The segment times in
+            # `chunks` are absolute (t+offset in the source), but the duration
+            # window _sanitize_highlights enforces is chunk-relative — feeding
+            # absolute times made every non-first chunk clamp to end<=start
+            # and get DROPPED (audit F3: only chunk-1 clips ever survived on
+            # videos longer than LONG_VIDEO_THRESHOLD).
+            rel_chunk = {
+                **chunk,
+                "segments": [
+                    {**s, "start": float(s["start"]) - offset, "end": float(s["end"]) - offset}
+                    for s in chunk["segments"]
+                ],
+            }
+            text = build_transcript_text(rel_chunk)
             print(f"[highlights] chunk {i + 1}/{len(chunks)} (offset {offset:.0f}s)", flush=True)
             result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn, context_block=context_block)
             for h in result.get("highlights", []):

@@ -92,6 +92,10 @@ jobs:
             campaign/ig_token.json
             output/*.srt
             output/trend_context.json
+            # Clips sitting in the upload queues are referenced by file PATH —
+            # the runner disk is ephemeral, so persist the queued .mp4 files
+            # too or the next cron tick finds only missing files (audit F8).
+            output/campaign_*/video_*/short_*.mp4
           key: campaign-state-${{ github.run_id }}
           restore-keys: |
             campaign-state-
@@ -114,7 +118,9 @@ jobs:
           echo "YouTube cookies decoded — yt-dlp will run authenticated."
 
       - name: Generate clips
-        timeout-minutes: 90
+        # 210 min inside the 240-min job window: pinned-local runs (CPU-only
+        # whisper + LLM) can take ~2× the cloud-first time (audit F10).
+        timeout-minutes: 210
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # Optional LLM failover — if unset, the pipeline runs Groq + local tier-3.

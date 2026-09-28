@@ -332,9 +332,14 @@ def process_ig_upload_queue(queue_path: str = IG_QUEUE_PATH,
                             registry_path=os.path.join("campaign", "posting_registry.json"),
                             token_store: str = IG_TOKEN_STORE) -> Dict:
     """Drain the IG queue within per-run budget; register + clean up successes."""
-    result = {"uploaded": 0, "queued": 0, "failed_attempts": 0}
+    result = {"uploaded": 0, "queued": 0, "failed_attempts": 0, "dropped_missing_file": 0}
     if not ig_uploads_configured():
         return result
+
+    # Roll the 60-day token forward BEFORE any API work (audit F7: this was
+    # written but never invoked — tokens would have silently lapsed, failing
+    # every upload to strike-out around the 60-day mark).
+    roll_token_forward(store_path=token_store)
 
     queue = _load_queue(queue_path)
     budget = IG_UPLOAD_MAX_PER_RUN
@@ -342,6 +347,12 @@ def process_ig_upload_queue(queue_path: str = IG_QUEUE_PATH,
     for item in sorted(queue.get("items", []), key=lambda i: int(i.get("score", 0)), reverse=True):
         if budget <= 0:
             remaining.append(item)
+            continue
+        # Runner disk is ephemeral: a clip queued in an earlier run may be
+        # gone (audit F8). That's not an upload failure — drop, don't strike.
+        if not os.path.exists(item.get("clip_path") or ""):
+            result["dropped_missing_file"] += 1
+            print(f"[ig] 🗑 {os.path.basename(item.get('clip_path', '?'))} gone with the runner — dropped, no strike", flush=True)
             continue
         try:
             media_id = upload_reel(item["clip_path"], item.get("instagram") or {}, token_store=token_store)

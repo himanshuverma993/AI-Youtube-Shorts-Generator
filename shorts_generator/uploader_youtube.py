@@ -255,7 +255,8 @@ def process_upload_queue(queue_path: str = QUEUE_PATH,
                          ledger_path: str = LEDGER_PATH,
                          registry_path=os.path.join("campaign", "posting_registry.json")) -> Dict:
     """Upload queued clips within budget; register successes; strike out repeats."""
-    result = {"uploaded": 0, "queued": 0, "failed_attempts": 0, "skipped_no_budget": 0}
+    result = {"uploaded": 0, "queued": 0, "failed_attempts": 0, "skipped_no_budget": 0,
+              "dropped_missing_file": 0}
     if not uploads_configured():
         return result
 
@@ -266,6 +267,14 @@ def process_upload_queue(queue_path: str = QUEUE_PATH,
         if budget <= 0:
             remaining.append(item)
             result["skipped_no_budget"] += 1
+            continue
+        # Runner disk is ephemeral (audit F8): a clip queued in an earlier
+        # run may be gone — that's not an upload failure, drop without a
+        # strike (the workflow cache now persists queued short_*.mp4 files,
+        # so this only fires after cache eviction).
+        if not os.path.exists(item.get("clip_path") or ""):
+            result["dropped_missing_file"] += 1
+            print(f"[upload] 🗑 {os.path.basename(item.get('clip_path', '?'))} gone with the runner — dropped, no strike", flush=True)
             continue
         try:
             video_id = upload_clip(item["clip_path"], item.get("youtube") or {})

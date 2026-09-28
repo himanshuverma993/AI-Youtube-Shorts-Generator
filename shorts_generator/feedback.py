@@ -366,10 +366,17 @@ def load_feedback_stats(stats_path: str = STATS_PATH) -> Dict:
 def _fmt_post_line(row: Dict, rank: int) -> str:
     title = (row.get("title") or row.get("video_id") or "?").strip()
     hook = (row.get("hook_line") or "").strip()
-    retention = row.get("averageViewPercentage") or 0
     views = row.get("views") or 0
-    line = (f"{rank}. \"{title}\" — retention {retention:.0f}%, views "
-            f"{int(views):,}, score {row.get('score', 0)}")
+    # Platform-truthful metrics (audit F9): IG has NO retention metric —
+    # call reach "reach", not "retention 0%", so the model isn't misled.
+    if row.get("platform") == "instagram":
+        shares = int(float(row.get("shares") or 0))
+        saves = int(float(row.get("saved") or 0))
+        line = f"{rank}. [IG] \"{title}\" — reach {int(views):,}, shares {shares:,}, saves {saves:,}, score {row.get('score', 0)}"
+    else:
+        retention = row.get("averageViewPercentage") or 0
+        line = (f"{rank}. [YT] \"{title}\" — retention {retention:.0f}%, views "
+                f"{int(views):,}, score {row.get('score', 0)}")
     if hook:
         line += f" — opening hook: \"{hook}\""
     return line
@@ -383,10 +390,12 @@ def build_feedback_block(stats: Dict, for_stage: str = "highlights") -> str:
         return ""
     top = posts[:3]
     bottom = posts[-3:][::-1]
+    scoring = stats.get("scoring") or {}
+    scoring_note = "; ".join(f"{k}: {v}" for k, v in scoring.items()) or "60% retention + 40% view velocity"
     lines = [
         "CHANNEL FEEDBACK (measured on THIS channel's real posted videos — actual "
-        "retention & view data from YouTube Analytics; weight this above generic advice):",
-        "TOP PERFORMERS (score = 60% retention + 40% view velocity):",
+        "platform analytics data; weight this above generic advice):",
+        f"TOP PERFORMERS (score formula — {scoring_note}):",
     ]
     lines += [_fmt_post_line(p, i + 1) for i, p in enumerate(top)]
     lines.append("UNDERPERFORMERS (avoid repeating these patterns):")

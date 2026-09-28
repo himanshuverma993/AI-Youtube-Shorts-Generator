@@ -52,9 +52,15 @@ def main() -> int:
         print(f"     hook:   {s.get('hook_sentence')}")
         meta = s.get("metadata") or {}
         if meta:
-            print(f"     yt-title:       {meta.get('title')}")
-            print(f"     yt-description: {meta.get('description')}")
-            print(f"     yt-hashtags:    {' '.join(meta.get('hashtags') or [])}")
+            # Platform-split payloads (Phase 1): predecessor keys
+            # title/description/hashtags don't exist at meta level (audit F2).
+            yt = meta.get("youtube") or {}
+            ig = meta.get("instagram") or {}
+            print(f"     yt-title:       {yt.get('title')}")
+            print(f"     yt-description: {yt.get('description')}")
+            print(f"     yt-hashtags:    {' '.join(yt.get('hashtags') or [])}")
+            ig_first = (ig.get("caption") or "").splitlines()
+            print(f"     ig-caption:     {ig_first[0] if ig_first else ''}")
         if s.get("clip_url"):
             print(f"     clip:   {s['clip_url']}")
         else:

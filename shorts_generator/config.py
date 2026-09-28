@@ -2,7 +2,10 @@
 
 This fork is wired for a $0-cost stack:
   * Groq free tier       — hosted Whisper transcription + primary LLM
-  * Cerebras free tier   — automatic LLM fallback (no credit card)
+  * Groq free tier       — hosted Whisper transcription + primary LLM
+  * Cerebras             — optional LLM fallback (since July 2026 its API key
+                           needs a payment method — used only if you HAVE one;
+                           simply skipping it costs nothing)
   * faster-whisper local — automatic transcription fallback (pure CPU, no API)
   * yt-dlp / ffmpeg / OpenCV — download + clipping + vertical reframe (local)
 
@@ -29,8 +32,9 @@ GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT", "300"))
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "5"))
 
 # ---------------------------------------------------------------------------
-# Cerebras (free tier) — automatic LLM fallback when Groq hard-fails.
-# 1M free tokens/day, no credit card — https://cloud.cerebras.ai
+# Cerebras — automatic LLM fallback when Groq hard-fails. OPTIONAL: since
+# July 2026 Cerebras requires a payment method to activate an API key, so on
+# most $0 setups this stays unset and the chain simply skips the tier.
 # NOTE: Cerebras has no free Whisper, so audio TRANSCRIPTION stays on Groq;
 # the failover only covers chat/LLM calls (highlights + metadata).
 # ---------------------------------------------------------------------------
