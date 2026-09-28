@@ -140,6 +140,12 @@ def main() -> int:
             f"local CPU tier-3: {'✓ (zero-key doomsday mode)' if local_llm_enabled() else '✗'}",
             flush=True,
         )
+        from shorts_generator.config import WHISPER_LOCAL_PINNED, LLM_LOCAL_PINNED
+        print(
+            f"[campaign] providers — whisper: {'📌 local-only (WHISPER_PROVIDER=local)' if WHISPER_LOCAL_PINNED else 'Groq → local fallback'} | "
+            f"llm: {'📌 local-only (LLM_PROVIDER=local)' if LLM_LOCAL_PINNED else 'Groq → Cerebras → local'}",
+            flush=True,
+        )
         # Feedback-loop status line (never fatal — even a corrupt registry
         # must not stop clipping).
         try:

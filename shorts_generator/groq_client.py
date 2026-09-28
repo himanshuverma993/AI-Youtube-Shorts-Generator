@@ -35,6 +35,7 @@ from .config import (
     GROQ_TIMEOUT_SECONDS,
     GROQ_WHISPER_MODEL,
     LLM_CIRCUIT_BREAK_SECONDS,
+    LLM_LOCAL_PINNED,
     cerebras_fallback_available,
     local_llm_enabled,
     require_cerebras_key,
@@ -224,6 +225,13 @@ def call_llm(prompt: str) -> str:
     free tiers are down.
     """
     last_error: Optional[Exception] = None
+
+    # ---- Pinned local mode: never touch any cloud, not even to "try" ----
+    if LLM_LOCAL_PINNED:
+        print("[llm] 📌 LLM_PROVIDER=local — cloud tiers bypassed, running on "
+              "local CPU model (zero keys by design)", flush=True)
+        return call_local_llm(prompt)
+
     groq_has_fallback = cerebras_fallback_available() or local_llm_enabled()
 
     # ---- Tier 1: Groq ----

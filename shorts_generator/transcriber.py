@@ -36,6 +36,7 @@ from .config import (
     OUTPUT_DIR,
     WHISPER_CIRCUIT_BREAK_SECONDS,
     WHISPER_FALLBACK_ENABLED,
+    WHISPER_LOCAL_PINNED,
 )
 from .groq_client import transcribe_audio_groq
 from .local.whisper import transcribe_whisper_local
@@ -193,6 +194,13 @@ def _transcribe_unified(audio_path: str, language: Optional[str], offset: float 
 
     ``offset`` shifts timestamps for pre-split chunks (segment i starts at
     i × AUDIO_CHUNK_SECONDS in the original media)."""
+    if WHISPER_LOCAL_PINNED:
+        # 📌 Pinned local mode: no cloud whisper call is ever attempted, not
+        # even a "try" — every audio second runs on this machine's CPU.
+        print("[transcribe] 📌 WHISPER_PROVIDER=local — faster-whisper on CPU "
+              "(cloud whisper bypassed by design)", flush=True)
+        data = transcribe_whisper_local(audio_path, language=language)
+        return _shift_local(data, offset)
     if WHISPER_FALLBACK_ENABLED and not _groq_whisper_healthy():
         print("[transcribe] Groq Whisper circuit open — using local faster-whisper", flush=True)
         data = transcribe_whisper_local(audio_path, language=language)
@@ -261,8 +269,9 @@ def transcribe(media_path: str, language: Optional[str] = None) -> Dict:
         _extract_audio(media_path, audio_path)
         size = os.path.getsize(audio_path)
 
-        if size <= GROQ_MAX_AUDIO_BYTES:
-            print(f"[transcribe] transcribing {size / 1e6:.1f} MB (Groq → local fallback)", flush=True)
+        mode = "local faster-whisper 📌" if WHISPER_LOCAL_PINNED else "Groq → local fallback"
+        if size <= GROQ_MAX_AUDIO_BYTES or WHISPER_LOCAL_PINNED:
+            print(f"[transcribe] transcribing {size / 1e6:.1f} MB ({mode})", flush=True)
             duration, segments = _transcribe_unified(audio_path, language)
         else:
             print(

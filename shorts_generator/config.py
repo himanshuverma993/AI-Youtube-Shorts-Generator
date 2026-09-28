@@ -87,6 +87,18 @@ LOCAL_LLM_THREADS = int(os.getenv("LOCAL_LLM_THREADS", "0"))       # 0 = library
 LOCAL_LLM_MAX_TOKENS = int(os.getenv("LOCAL_LLM_MAX_TOKENS", "2048"))
 
 # ---------------------------------------------------------------------------
+# Provider pinning (100%-local sovereignty mode)
+# ---------------------------------------------------------------------------
+# "auto" (default, unchanged): cloud-first with local CPU failover.
+# "local": that backend NEVER touches a cloud API — every prompt / every
+# audio second is processed on this machine's CPU. Free tiers can all vanish
+# tomorrow (Cerebras showed us how) and the campaign will not even notice.
+WHISPER_PROVIDER = os.getenv("WHISPER_PROVIDER", "auto").strip().lower()   # auto / local
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()           # auto / local
+WHISPER_LOCAL_PINNED = WHISPER_PROVIDER == "local"
+LLM_LOCAL_PINNED = LLM_PROVIDER == "local"
+
+# ---------------------------------------------------------------------------
 # Trend context (Phase-1 Fix 2) — OPTIONAL, zero-key sources, fail-soft.
 # OFF by default until the operator names the campaign niche (generic trends
 # without a niche are noise). When on, a "what is working right now" block

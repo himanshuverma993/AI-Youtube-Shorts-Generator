@@ -129,6 +129,7 @@ Caveats of the free-runner tier: private repos consume the 2,000 free minutes/mo
 | `LLM_FALLBACK` / `LLM_CIRCUIT_BREAK_SECONDS` | `true` / `300` | failover toggle + Groq skip-after-failure window |
 | `LOCAL_WHISPER_MODEL` | `small` | local Whisper fallback model: `tiny`/`base`/`small`/`medium` |
 | `WHISPER_FALLBACK` / `WHISPER_CIRCUIT_BREAK_SECONDS` | `true` / `300` | local-Whisper failover toggle + Groq-Whisper skip window |
+| `WHISPER_PROVIDER` / `LLM_PROVIDER` | `auto` / `auto` | set to `local` = pinned 100%-local mode: that backend NEVER touches a cloud API, even with keys present |
 | `CAMPAIGN_NICHE` | *(empty = trends OFF)* | niche keywords that arm the trend-context layer |
 | `TREND_CONTEXT` / `TRENDS_GEO` / `TREND_CACHE_HOURS` | `true` / `IN` / `24` | trend injection toggle, RSS geo, cache TTL |
 | `FEEDBACK` / `FEEDBACK_MIN_POSTS` / `FEEDBACK_MIN_AGE_HOURS` | `true` / `5` / `48` | feedback loop toggle + activation thresholds |
@@ -148,5 +149,6 @@ Caveats of the free-runner tier: private repos consume the 2,000 free minutes/mo
 - If Groq's **LLM** hard-fails and `CEREBRAS_API_KEY` is set, `call_llm` replays the exact same prompt on Cerebras; if Cerebras also dies (or is absent), it replays on a **local llama.cpp model** (default Qwen2.5-3B-Instruct Q4_K_M, ~1.9 GB, grammar-forced JSON so a 3B can't emit broken output). A circuit breaker per cloud skips the dead tier for the rest of the run, then re-probes it later.
 - If Groq **Whisper** hard-fails (outage / audio-seconds quota / bad key), transcription fails over to **local faster-whisper** on the runner's own CPU (`LOCAL_WHISPER_MODEL=small`, int8 ≈ 7–8 min per hour of podcast audio on 4 cores) — no key, no quota, just slower.
 - First tier-3 run downloads ~2 GB of model weights once; the workflow caches `models/` so later runs start instantly.
+- **100%-local sovereignty mode:** set `WHISPER_PROVIDER=local` and/or `LLM_PROVIDER=local` (repo Variables) and those backends bypass every cloud API entirely — no "try-then-failover", not one cloud byte. Works even with `GROQ_API_KEY` set (it just goes unused). Trade-off honesty: ~2× wall-clock per run and a 3B/whisper-small quality dip vs 70B/large-v3 — free tiers dying can't close the plant, but they also never improved the product past 'good enough'.
 - Everything runs on stock `ubuntu-latest` runners: only `ffmpeg` from apt + four pip packages.
 - `opencv-python-headless` is used (no GUI libs), so no extra system X11 packages are needed on a headless runner.

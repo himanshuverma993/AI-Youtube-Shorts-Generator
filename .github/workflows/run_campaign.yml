@@ -49,7 +49,9 @@ env:
 jobs:
   clip:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 240 min: pinned-local runs (WHISPER/LLM_PROVIDER=local) process a 2h
+    # podcast entirely on CPU — roughly 2× the cloud-first wall-clock time.
+    timeout-minutes: 240
 
     steps:
       - name: Checkout
@@ -127,6 +129,10 @@ jobs:
           YT_PRIVACY: ${{ vars.YT_PRIVACY || 'private' }}
           IG_UPLOAD_ENABLED: ${{ vars.IG_UPLOAD_ENABLED || 'false' }}
           CAMPAIGN_NICHE: ${{ vars.CAMPAIGN_NICHE }}
+          # 100%-local sovereignty mode: set either to "local" to guarantee
+          # that backend never touches a cloud API (default 'auto' unchanged).
+          WHISPER_PROVIDER: ${{ vars.WHISPER_PROVIDER || 'auto' }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'auto' }}
           # Optional feedback loop (Phase 2) — inactive until all 3 are set;
           # created once via scripts/oauth_local_setup.py. FREE read-only
           # YouTube Analytics, no billing needed.
