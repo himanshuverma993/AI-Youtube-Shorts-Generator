@@ -4,5 +4,5 @@
 # campaign/processed_urls.txt (persisted between GitHub Actions runs via
 # the workflow cache), so scheduled reruns only pick up newly added URLs.
 #
-# Add your URLs below, e.g.:
-# https://www.youtube.com/watch?v=dQw4w9WgXcQ
+# First live clipping test (no uploads — artifacts only):
+https://www.youtube.com/watch?v=ULsyvuvg-NU
