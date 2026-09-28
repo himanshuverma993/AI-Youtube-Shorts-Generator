@@ -82,3 +82,22 @@ Accepted & bounded (documented, intentionally not changed): the campaign-state
 cache grows with the upload backlog (~10–40 MB per day of backlog) — GitHub's
 LRU eviction handles it and queue JSON is authoritative, so resurrected stale
 mp4 files are inert without queue entries.
+
+---
+
+## Fourth pass — adversarial sweep (2026-09-28, on operator's "zero issues ever" order)
+
+Method: hunt only two things — secret leak-paths into logs, and
+corruption-resilience of every persisted state file. Three real findings
+fixed:
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| F14 | 🔴 | `_http_json` error messages echoed the full URL **including query params** — and the IG token-roll grant sends `fb_exchange_token` + `client_secret` in params. One Graph error → both secrets in the (public-repo) CI console log | Query string stripped from all raised errors (path only); leak proven impossible by a forced-401 test asserting no token/app-id/secret strings appear |
+| F15 | 🟡 | `_stored_token` crashed (`AttributeError`) on valid-JSON-wrong-shape stores (e.g. a list) | isinstance shape check |
+| F15b | 🟡 | Trend context cache: same wrong-shape class (`AttributeError` escaped the loader) | isinstance check + TypeError → silent rebuild |
+
+Adversarial battery: 41/41 cases green — every ledger/queue/registry/stats/
+token-store/trend-cache loader survives missing/empty/invalid-JSON/wrong-type/
+wrong-shape files; valid cache hits still served; forced 401 on the token
+exchange leaks zero secret bytes; full compile clean.

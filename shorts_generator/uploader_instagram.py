@@ -57,9 +57,10 @@ def _stored_token(store_path: Optional[str] = IG_TOKEN_STORE) -> Optional[str]:
     try:
         with open(store_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        token = data.get("token")
-        if token:
-            return token
+        if isinstance(data, dict):  # adversarial pass: valid JSON ≠ valid shape
+            token = data.get("token")
+            if token:
+                return token
     except (OSError, ValueError):
         pass
     return None
@@ -130,7 +131,11 @@ def _http_json(url: str, method: str = "GET", params: Optional[Dict] = None,
             return json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
         payload = e.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"HTTP {e.code} for {url}: {payload}") from e
+        # AUDIT F14 (security): NEVER echo query params in errors — calls like
+        # the fb_exchange_token grant carry fb_exchange_token + client_secret
+        # in the URL, and this message is printed to (PUBLIC-repo) CI logs.
+        safe_url = url.split("?")[0]
+        raise RuntimeError(f"HTTP {e.code} for {safe_url}: {payload}") from e
 
 
 def _graph_json(method: str, path: str, params: Optional[Dict] = None,

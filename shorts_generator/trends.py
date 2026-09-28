@@ -102,6 +102,8 @@ def load_trend_context(force: bool = False) -> Dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 cached = json.load(f)
+            if not isinstance(cached, dict):  # adversarial pass: shape check
+                raise TypeError("cache is not an object")
             age = time.time() - float(cached.get("generated_epoch", 0))
             if 0 <= age < TREND_CACHE_HOURS * 3600:
                 print(f"[trends] cache hit ({age / 3600:.1f}h old, TTL {TREND_CACHE_HOURS}h)", flush=True)
