@@ -184,9 +184,16 @@ def _staging_release() -> Dict:
 
 
 def stage_clip_public(clip_path: str) -> Dict:
-    """Upload clip as a release asset; returns {url, asset_id, release}."""
+    """Upload clip as a release asset; returns {url, asset_id, release}.
+
+    Asset names get a unique suffix (audit F12): distinct clips legitimately
+    share the same basename (video_001/short_01.mp4, video_002/short_01.mp4),
+    and GitHub rejects a duplicate asset NAME in one release with 422 — which
+    would burn an upload attempt on a perfectly good clip if a previous
+    asset deletion ever lagged. Unique names make collision impossible."""
     release = _staging_release()
-    name = os.path.basename(clip_path)
+    stem, ext = os.path.splitext(os.path.basename(clip_path))
+    name = f"{stem}-{int(time.time())}-{os.urandom(3).hex()}{ext}"
     upload_url = release["upload_url"].split("{")[0]
     with open(clip_path, "rb") as fh:
         data = fh.read()

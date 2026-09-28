@@ -214,11 +214,15 @@ def _put_video_file(session_uri: str, clip_path: str) -> Dict:
 
 def _build_snippet(meta: Dict, category_id: str = YT_CATEGORY_ID) -> Dict:
     """API snippet from our youtube metadata payload — disclosure-safe:
-    the description already ends with #ad #sponsored (metadata.py enforces)."""
-    hashtags = " ".join((meta.get("hashtags") or [])).strip()
+    the description already ends with #ad #sponsored (metadata.py enforces).
+    Hashtag line is appended once at TAG level (audit F13: a description
+    containing SOME tags must not cause the shared ones to repeat)."""
     description = (meta.get("description") or "").strip()
-    if hashtags and hashtags not in description:
-        description = f"{description}\n{hashtags}".strip()
+    present = {tok.rstrip(",.;:!\"'") for tok in description.split()}
+    missing = [t for t in (meta.get("hashtags") or [])
+               if str(t).strip() and str(t).rstrip(",.;:!\"'") not in present]
+    if missing:
+        description = f"{description}\n{' '.join(missing)}".strip()
     return {
         "title": (meta.get("title") or "Untitled short").strip()[:100],
         "description": description,

@@ -55,3 +55,30 @@ pass 1 was eliminated too. Six more hardening fixes, each battery-verified:
 Battery: P1–P6 green (typed fallback incl. arithmetic invariants; subprocess
 banner + drain assertions); regression sweep re-confirms pinned-local
 zero-cloud and full compile.
+
+---
+
+## Third pass — final audit (2026-09-28, post-fix state)
+
+Scope: re-read of every fix hunk in EXACT post-fix form (fixes can carry their
+own bugs) + fresh end-to-end flow hunts + one consolidated golden battery
+re-proving all 17 invariants on the final tree.
+
+New findings this pass (both real, both fixed):
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| F12 | 🟡 | IG release staging uploaded assets with the clip's BASENAME (video_001/short_01.mp4, video_002/short_01.mp4 → same name). GitHub rejects duplicate asset names in one release with 422 — if a previous asset DELETE ever lagged, the next same-named clip would burn an upload attempt to strike-out | Asset names now get an epoch+random suffix — collision impossible |
+| F13 | ⚪ | YouTube `_build_snippet` appended the WHOLE hashtag line whenever the joined string wasn't in the description — a description containing SOME tags got the shared ones duplicated | Tag-level, punctuation-tolerant dedupe (mirrors the IG caption fix P5) |
+
+Golden battery on the final tree (9 suites, all green): F12 unique names,
+F13 tag-dedupe + snippet shape, F3 long-video chunk productivity re-run,
+duration-lock both documented behaviors (partial violation → drop-and-continue,
+total violation → loud failure after 3 attempts), F7 roll-before-drain,
+F8 drop-no-strike, pinned-zero-cloud, YT budget 5/6→1 posted+registered→6/6,
+FTC disclosure on LLM AND fallback metadata, YAML + 20-module compile.
+
+Accepted & bounded (documented, intentionally not changed): the campaign-state
+cache grows with the upload backlog (~10–40 MB per day of backlog) — GitHub's
+LRU eviction handles it and queue JSON is authoritative, so resurrected stale
+mp4 files are inert without queue entries.
