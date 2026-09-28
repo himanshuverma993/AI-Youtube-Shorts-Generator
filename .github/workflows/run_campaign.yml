@@ -120,6 +120,13 @@ jobs:
           # Route ALL local model downloads (whisper fallback + tier-3 GGUF)
           # into models/ so the cache block above persists them between runs.
           HF_HOME: models/hf
+          # On/off switches live in repo Variables (Settings → Secrets and
+          # variables → Actions → Variables tab) so the operator never edits
+          # this file. Codes default to SAFE states when the variable is unset.
+          UPLOAD_ENABLED: ${{ vars.UPLOAD_ENABLED || 'false' }}
+          YT_PRIVACY: ${{ vars.YT_PRIVACY || 'private' }}
+          IG_UPLOAD_ENABLED: ${{ vars.IG_UPLOAD_ENABLED || 'false' }}
+          CAMPAIGN_NICHE: ${{ vars.CAMPAIGN_NICHE }}
           # Optional feedback loop (Phase 2) — inactive until all 3 are set;
           # created once via scripts/oauth_local_setup.py. FREE read-only
           # YouTube Analytics, no billing needed.
