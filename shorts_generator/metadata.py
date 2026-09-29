@@ -54,10 +54,16 @@ def _enforce_disclosure(text: str) -> str:
 
     Every generated payload passes through here, so "#ad #sponsored" ends up
     on EVERY output — guaranteed in code, not by the model.
+
+    Matching is case-insensitive and ignores trailing punctuation: a model
+    that wrote "#Ad" or "...#sponsored." previously failed the exact-string
+    membership test, so the tag was appended a SECOND time and the upload
+    carried a visibly duplicated disclosure.
     """
     body = (text or "").strip()
-    existing = set(body.split())
-    missing = [tag for tag in FTC_DISCLOSURE_TAGS.split() if tag not in existing]
+    existing = {tok.lower().rstrip(",.;:!?\"'") for tok in body.split()}
+    missing = [tag for tag in FTC_DISCLOSURE_TAGS.split()
+               if tag.lower() not in existing]
     if not missing:
         return body
     return f"{body} {' '.join(missing)}".strip() if body else " ".join(missing)

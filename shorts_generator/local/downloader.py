@@ -134,12 +134,70 @@ def _resolve_local_path(source: str) -> Optional[str]:
 
 
 def _existing_download(out_dir: str, video_id: str) -> Optional[str]:
-    """Return a cached download path if we already have this YouTube id."""
+    """Return a cached download path if we already have this YouTube id.
+
+    Zero-byte files are ignored: a runner killed mid-download can leave the
+    final name in place with no content, and returning it would send an empty
+    file into ffmpeg and produce a baffling error three stages later.
+    """
     for ext in (".mp4", ".mkv", ".webm"):
         candidate = os.path.join(out_dir, f"source_{video_id}{ext}")
-        if os.path.exists(candidate):
-            return candidate
+        try:
+            if os.path.getsize(candidate) > 0:
+                return candidate
+        except OSError:
+            continue
     return None
+
+
+# yt-dlp's in-progress scratch files. A download that dies partway through —
+# bot-check mid-stream, runner timeout, SIGKILL — leaves these behind, and for
+# a 720p source they are HUNDREDS OF MEGABYTES each. Nothing ever cleaned them
+# up, so a repeatedly-failing URL silently filled the runner's 14 GB disk one
+# cron tick at a time until an unrelated step died with ENOSPC.
+_PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".download")
+
+
+def purge_partial_downloads(out_dir: str, video_id: Optional[str] = None) -> int:
+    """Delete yt-dlp scratch files. Returns the number of bytes reclaimed."""
+    if not os.path.isdir(out_dir):
+        return 0
+    stem = f"source_{video_id}" if video_id else "source_"
+    reclaimed = 0
+    for name in os.listdir(out_dir):
+        if not name.startswith(stem):
+            continue
+        # ".part" can be mid-name, e.g. "source_x.f137.mp4.part-Frag3"
+        if not any(suffix in name for suffix in _PARTIAL_SUFFIXES):
+            continue
+        path = os.path.join(out_dir, name)
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+            reclaimed += size
+        except OSError:
+            continue
+    if reclaimed:
+        print(f"[download/local] cleaned {reclaimed / 1e6:.1f} MB of partial "
+              f"download scratch files", flush=True)
+    return reclaimed
+
+
+def is_downloaded_source(path: str, out_dir: Optional[str] = None) -> bool:
+    """True when ``path`` is a file THIS module downloaded (so it is safe to
+    delete after processing), False when it is a user-supplied local input.
+
+    Deleting a user's own input file would be catastrophic and unrecoverable,
+    so the test is deliberately narrow: the file must live in the download
+    directory AND carry the ``source_`` prefix this module writes.
+    """
+    if not path:
+        return False
+    base = os.path.basename(path)
+    if not base.startswith("source_"):
+        return False
+    target_dir = os.path.abspath(out_dir or OUTPUT_DIR)
+    return os.path.abspath(os.path.dirname(path)) == target_dir
 
 
 def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[str] = None) -> str:
@@ -204,6 +262,10 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
                             break
         except Exception as e:  # noqa: BLE001 - classified below
             last_err = e
+            # DISK: a failed attempt can leave a multi-hundred-MB .part file.
+            # Purge before the NEXT client retries, otherwise a 5-client
+            # rotation over a big video can strand 5 partial copies at once.
+            purge_partial_downloads(out_dir, video_id)
             blocked = _is_client_blocked(e)
             more = attempt < len(clients)
             print(
@@ -220,6 +282,19 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
                 raise  # genuinely unavailable video — fail fast, don't burn retries
             break
         else:
+            # Guard against a "successful" extract that produced nothing on
+            # disk: yt-dlp can report success for a format it then failed to
+            # merge, and an empty source poisons every downstream stage.
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                purge_partial_downloads(out_dir, video_id)
+                last_err = RuntimeError(
+                    f"yt-dlp reported success but produced no usable file at {path}"
+                )
+                if attempt < len(clients):
+                    print(f"[download/local] player_client={client} produced an "
+                          f"empty file — trying {clients[attempt]}", flush=True)
+                    continue
+                break
             if client != "default":
                 print(f"[download/local] recovered via player_client={client} "
                       f"(set YTDLP_PLAYER_CLIENTS={client} to try it first)", flush=True)

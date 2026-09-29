@@ -22,8 +22,9 @@ import os
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional
+from typing import Dict, List
 
+from .safe_io import atomic_write_json
 from .config import CAMPAIGN_NICHE, OUTPUT_DIR, TREND_CACHE_HOURS, TREND_CONTEXT_ENABLED, TREND_MAX_ITEMS, TRENDS_GEO
 
 TREND_CACHE_FILENAME = "trend_context.json"
@@ -135,9 +136,7 @@ def load_trend_context(force: bool = False) -> Dict:
         "source_ok": {"youtube": bool(yt_items), "google_trends": bool(gt_titles)},
     }
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(ctx, f, ensure_ascii=False, indent=1)
+        atomic_write_json(path, ctx, indent=1)
     except OSError as e:
         print(f"[trends] cache write failed ({e}) — continuing uncached", flush=True)
     return ctx

@@ -16,8 +16,8 @@ download CPU and Groq Whisper/Llama quota forever, so after the third
 strike it is skipped (recorded in campaign/failed_urls.txt).
 """
 import argparse
-import json
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -28,7 +28,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from shorts_generator import generate_shorts
-from shorts_generator.config import OUTPUT_DIR
+from shorts_generator.config import KEEP_SOURCE_VIDEOS, MIN_FREE_DISK_MB, OUTPUT_DIR
+from shorts_generator.safe_io import append_line_durable, atomic_write_json, atomic_write_text
 
 # A URL that fails this many campaign runs is declared permanently broken
 # (e.g. no speech, geo-blocked, deleted) and skipped from then on — the
@@ -76,6 +77,49 @@ def is_transient_failure(exc: BaseException) -> bool:
     return any(marker in msg for marker in TRANSIENT_ERROR_MARKERS)
 
 
+def free_disk_mb(path: str = ".") -> float:
+    """Megabytes still available on the filesystem holding ``path``."""
+    try:
+        usage = shutil.disk_usage(os.path.abspath(path) if os.path.exists(path) else ".")
+        return usage.free / (1024 * 1024)
+    except OSError:
+        return float("inf")     # unknown — never block work on a failed probe
+
+
+def reclaim_source_videos(out_dir: str = OUTPUT_DIR) -> float:
+    """Delete downloaded ``source_*`` videos and yt-dlp scratch files.
+
+    THE RUNNER-DEATH BUG. ``generate_shorts`` downloads the full source into
+    OUTPUT_DIR and nothing in the codebase ever deleted it. A 720p source is
+    100-200 MB for a 20-minute video and over 1 GB for a long podcast, the
+    campaign loop processes URLs sequentially in ONE job, and a GitHub runner
+    has roughly 14 GB free. Five long videos filled the disk, and the failure
+    surfaced somewhere unrelated — a truncated mp4, an ffmpeg "No space left
+    on device", or the artifact upload dying — with nothing pointing at the
+    real cause. Rendered short_*.mp4 files live in per-video subdirectories
+    and are NEVER touched by this.
+    """
+    from shorts_generator.local.downloader import purge_partial_downloads
+
+    freed = float(purge_partial_downloads(out_dir))
+    if not os.path.isdir(out_dir):
+        return freed / 1e6
+    for name in os.listdir(out_dir):
+        if not name.startswith("source_"):
+            continue
+        path = os.path.join(out_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+            freed += size
+            print(f"[campaign] 🧹 reclaimed {size / 1e6:.0f} MB — {name}", flush=True)
+        except OSError as e:
+            print(f"[campaign] ⚠ could not delete {name} ({e})", flush=True)
+    return freed / 1e6
+
+
 def read_urls(path: str) -> list:
     """Active (non-comment, non-blank) URLs from the campaign file."""
     if not os.path.exists(path):
@@ -97,9 +141,14 @@ def read_processed(path: str) -> set:
 
 
 def mark_processed(path: str, url: str) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(url + "\n")
+    """Append a finished URL to the ledger and FSYNC it.
+
+    The plain buffered append left the line in the page cache. A runner killed
+    seconds later (very common — the upload/cache steps run right after) lost
+    it, and the next tick re-downloaded, re-transcribed and re-clipped a video
+    that was already done, spending Whisper and LLM quota for nothing.
+    """
+    append_line_durable(path, url)
 
 
 def read_failed_attempts(path: str) -> dict:
@@ -121,13 +170,20 @@ def read_failed_attempts(path: str) -> dict:
 
 
 def bump_failed_attempt(path: str, url: str, count: int) -> None:
-    """Renew the attempt count for a URL (rewrites the small ledger)."""
+    """Renew the attempt count for a URL (rewrites the small ledger).
+
+    ATOMIC. The previous implementation was a read-modify-write through
+    ``open(path, "w")``, which TRUNCATES before writing. A crash between the
+    truncate and the last line — job timeout, OOM kill, cancelled workflow —
+    destroyed the strike history of every URL that had not been re-written
+    yet. Those URLs silently reverted to zero strikes, so the 4x/day cron
+    went straight back to burning download CPU and Groq quota on videos that
+    had already been declared hopeless.
+    """
     attempts = read_failed_attempts(path)
     attempts[url] = count
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for u, c in attempts.items():
-            f.write(f"{u}\t{c}\n")
+    body = "".join(f"{u}\t{c}\n" for u, c in sorted(attempts.items()))
+    atomic_write_text(path, body)
 
 
 def main() -> int:
@@ -224,6 +280,27 @@ def main() -> int:
         # Per-video clip dir — otherwise every URL overwrites the previous
         # one's short_*.mp4 files (files land next to this video's JSON).
         video_dir = os.path.join(run_dir, f"video_{i:03d}")
+
+        # DISK PRE-FLIGHT. Refuse to start a download that cannot finish.
+        # Hitting ENOSPC mid-write produces a truncated mp4 that looks like a
+        # content failure and burns a strike on a healthy URL.
+        free_mb = free_disk_mb(OUTPUT_DIR)
+        if free_mb < MIN_FREE_DISK_MB:
+            print(f"[campaign] low disk: {free_mb:.0f} MB free "
+                  f"(floor {MIN_FREE_DISK_MB} MB) — reclaiming source videos", flush=True)
+            reclaim_source_videos(OUTPUT_DIR)
+            free_mb = free_disk_mb(OUTPUT_DIR)
+            if free_mb < MIN_FREE_DISK_MB:
+                msg = (f"insufficient disk space: {free_mb:.0f} MB free, "
+                       f"{MIN_FREE_DISK_MB} MB required")
+                print(f"[campaign] ⏸ {msg} — stopping before {url}", flush=True)
+                failed += 1
+                # Infrastructure, not content: never spend a strike for this.
+                summaries.append({"url": url, "status": "failed", "error": msg,
+                                  "failed_attempts": attempts.get(url, 0),
+                                  "transient": True})
+                continue
+
         try:
             result = generate_shorts(
                 youtube_url=url,
@@ -234,8 +311,10 @@ def main() -> int:
                 output_dir=video_dir,
             )
             json_path = os.path.join(run_dir, f"result_{i:03d}.json")
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=2)
+            # ATOMIC + ensure_ascii=False: a crash used to leave truncated
+            # JSON that no downstream tool could parse, and \uXXXX-escaping
+            # made every Hindi artifact unreadable and ~3x larger.
+            atomic_write_json(json_path, result, indent=2)
             mark_processed(args.processed_log, url)
             ok += 1
             summaries.append({"url": url, "status": "ok", "json": json_path,
@@ -279,13 +358,24 @@ def main() -> int:
                 else:
                     print(f"[campaign] strike {new_count}/{MAX_FAILED_ATTEMPTS} reached — URL permanently skipped from now on", flush=True)
             traceback.print_exc()
+        finally:
+            # Free the source BEFORE the next URL downloads its own. This runs
+            # on the success path and on every failure path, which is the
+            # whole point: a video that failed at the clipping stage still
+            # left its full 720p download sitting on the disk.
+            if not KEEP_SOURCE_VIDEOS:
+                freed = reclaim_source_videos(OUTPUT_DIR)
+                if freed:
+                    print(f"[campaign] disk: {freed:.0f} MB reclaimed, "
+                          f"{free_disk_mb(OUTPUT_DIR):.0f} MB free", flush=True)
 
     uploads_summary = None
     if run_dir:
         summary_path = os.path.join(run_dir, "summary.json")
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump({"run_dir": run_dir, "ok": ok, "failed": failed,
-                       "skipped_strikeouts": skipped, "videos": summaries}, f, indent=2)
+        atomic_write_json(summary_path, {
+            "run_dir": run_dir, "ok": ok, "failed": failed,
+            "skipped_strikeouts": skipped, "videos": summaries,
+        }, indent=2)
 
     # Phase 3: drain the upload queue within budget — runs even on queue-only
     # ticks (no new URLs) so backlogged clips still go out 4×/day.

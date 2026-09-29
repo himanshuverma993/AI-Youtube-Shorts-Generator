@@ -13,7 +13,8 @@ from typing import Dict, List, Optional
 
 from .highlights import get_highlights
 from .local.clipper import crop_highlights_local
-from .local.downloader import download_youtube_local
+from .config import KEEP_SOURCE_VIDEOS
+from .local.downloader import download_youtube_local, is_downloaded_source
 from .metadata import generate_metadata
 from .transcriber import transcribe
 from .trends import get_trend_block
@@ -73,7 +74,38 @@ def generate_shorts(
     context_metadata = _context_for_stage("metadata")
 
     source_path = download_youtube_local(youtube_url, fmt=download_format)
+    try:
+        return _generate_from_source(
+            source_path, youtube_url, num_clips, aspect_ratio, language,
+            output_dir, context_highlights, context_metadata,
+        )
+    finally:
+        # DISK: drop the full-resolution source as soon as its clips exist.
+        # `main.py` runs one video per process so this is the only chance to
+        # reclaim it; `campaign_runner` also sweeps between URLs. Guarded by
+        # is_downloaded_source so a user-supplied local input is NEVER deleted.
+        if not KEEP_SOURCE_VIDEOS and is_downloaded_source(source_path):
+            try:
+                size = os.path.getsize(source_path)
+                os.remove(source_path)
+                print(f"[pipeline] 🧹 removed source ({size / 1e6:.0f} MB): "
+                      f"{source_path}", flush=True)
+            except OSError as e:
+                print(f"[pipeline] ⚠ could not remove source ({e})", flush=True)
 
+
+def _generate_from_source(
+    source_path: str,
+    youtube_url: str,
+    num_clips: int,
+    aspect_ratio: str,
+    language: Optional[str],
+    output_dir: Optional[str],
+    context_highlights: str,
+    context_metadata: str,
+) -> Dict:
+    """Everything after the download — split out so the caller can guarantee
+    the source file is reclaimed on every exit path."""
     transcript = transcribe(source_path, language=language)
     if not transcript["segments"]:
         raise RuntimeError(

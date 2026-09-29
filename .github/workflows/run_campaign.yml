@@ -74,8 +74,11 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # --no-cache-dir: pip's wheel cache reached ~1 GB on this runner and
+          # the campaign needs that disk for source videos. Nothing here is
+          # reinstalled within a run, so the cache buys nothing.
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
 
       - name: Prepare directories
         run: mkdir -p output campaign
@@ -206,6 +209,17 @@ jobs:
             echo "ffmpeg=$(ffmpeg -version 2>/dev/null | head -1)"
             echo "cookies_configured=$([ -n "${YTDLP_COOKIES_FILE:-}" ] && echo yes || echo no)"
             echo "player_clients=${YTDLP_PLAYER_CLIENTS:-<default rotation>}"
+            echo ""
+            # Disk is a real failure mode here: a 19-minute 720p source is
+            # ~300 MB and the runner starts with ~14 GB free. A run that dies
+            # with a confusing ffmpeg/OpenCV error is often just out of space,
+            # so capture the evidence instead of guessing.
+            echo "--- disk ---"
+            df -h / /home/runner 2>/dev/null | sed 's/^/  /'
+            echo "--- largest paths under output/ ---"
+            du -sh output/* 2>/dev/null | sort -rh | head -15 | sed 's/^/  /'
+            echo "--- source videos still on disk (should be none) ---"
+            ls -lh output/source_*.mp4 2>/dev/null | sed 's/^/  /' || echo "  none"
           } > output/diagnostics/environment.txt
           for f in campaign/failed_urls.txt campaign/processed_urls.txt; do
             [ -f "$f" ] && cp "$f" output/diagnostics/ || true
@@ -216,6 +230,22 @@ jobs:
           echo "--- diagnostics ---"
           cat output/diagnostics/environment.txt
 
+      - name: Upload clips + metadata JSON
+        # `always()` so a FAILED run still ships summary.json + diagnostics —
+        # without it a red run leaves nothing to download and the only
+        # evidence is the ephemeral runner log.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-${{ github.run_number }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            output/short_*.mp4
+            output/result.json
+            output/campaign_*/
+            output/diagnostics/
+
       - name: Save tier-3 local model weights
         # Only when the restore missed — the key is static, so re-saving an
         # existing entry would just warn "cache already exists" every run.
@@ -225,6 +255,21 @@ jobs:
         with:
           path: models
           key: local-model-weights-v1
+
+      - name: Prune clips nothing is waiting to upload
+        # Ordering matters: this runs AFTER the artifact upload above, so the
+        # durable copy is already safe, and BEFORE the state cache below.
+        #
+        # The state cache persists output/campaign_*/video_*/short_*.mp4 so a
+        # queued upload can still find its file next tick. But the key is
+        # campaign-state-<run_id> — a NEW entry every run — and with uploads
+        # OFF nothing ever leaves the queues, so each tick re-cached the whole
+        # accumulated clip history. Four ticks a day walks that into the 10 GB
+        # per-repo cache limit and LRU eviction starts dumping the tier-3
+        # model weights, which are then re-downloaded every run.
+        if: always()
+        continue-on-error: true
+        run: python scripts/prune_state_cache.py
 
       - name: Save campaign state (ledgers + transcript caches)
         # `always()` is the whole point: a run that dies mid-way has still
@@ -249,19 +294,3 @@ jobs:
             output/trend_context.json
             output/campaign_*/video_*/short_*.mp4
           key: campaign-state-${{ github.run_id }}
-
-      - name: Upload clips + metadata JSON
-        # `always()` so a FAILED run still ships summary.json + diagnostics —
-        # without it a red run leaves nothing to download and the only
-        # evidence is the ephemeral runner log.
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shorts-${{ github.run_number }}-${{ github.run_attempt }}
-          retention-days: 14
-          if-no-files-found: warn
-          path: |
-            output/short_*.mp4
-            output/result.json
-            output/campaign_*/
-            output/diagnostics/

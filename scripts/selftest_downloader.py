@@ -44,7 +44,16 @@ def make_fake_ytdlp(behaviour, calls):
             msg = behaviour(self.client)
             if msg:
                 raise FakeError(msg)
-            return {"id": "ULsyvuvg-NU", "ext": "mp4"}
+            # A real successful download leaves BYTES on disk. The fake used
+            # to return metadata only, which the downloader's new
+            # empty-output guard correctly rejects — so the fixture now
+            # writes a file, matching what yt-dlp actually does.
+            info = {"id": "ULsyvuvg-NU", "ext": "mp4"}
+            out = self.prepare_filename(info)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "wb") as fh:
+                fh.write(b"\0" * 1024)
+            return info
 
         def prepare_filename(self, info):
             return os.path.join(self.opts["outtmpl"].rsplit(os.sep, 1)[0],
@@ -126,6 +135,38 @@ from shorts_generator.local.downloader import _is_client_blocked
 check(_is_client_blocked(Exception(BOT)), "curly-apostrophe bot-check classified as blocked")
 check(not _is_client_blocked(Exception("Video unavailable")), "'Video unavailable' NOT treated as bot-check")
 check(not _is_client_blocked(Exception("HTTP Error 404: Not Found")), "404 NOT treated as bot-check")
+
+print("\nT7: a 'successful' extract that wrote NO file is not accepted")
+# ---------------------------------------------------------------------------
+# yt-dlp can report success for a format it then fails to merge. Returning
+# that phantom path sent an empty/absent file into ffmpeg and the real cause
+# surfaced three stages later as an unreadable-frame-size error.
+class _PhantomYDL:
+    def __init__(self, opts): self.opts = opts
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def extract_info(self, url, download=True):
+        _phantom_calls.append(1)
+        return {"id": "ULsyvuvg-NU", "ext": "mp4"}
+    def prepare_filename(self, info):
+        return os.path.join(self.opts["outtmpl"].rsplit(os.sep, 1)[0],
+                            f"source_{info['id']}.mp4")
+
+_phantom_calls = []
+mod = types.ModuleType("yt_dlp")
+mod.YoutubeDL = _PhantomYDL
+mod.utils = types.SimpleNamespace(DownloadError=FakeError)
+with tempfile.TemporaryDirectory() as td:
+    sys.modules["yt_dlp"] = mod
+    from shorts_generator.local.downloader import download_youtube_local as _dl
+    try:
+        _dl("https://www.youtube.com/watch?v=ULsyvuvg-NU", out_dir=td)
+        check(False, "phantom download rejected (it returned a path anyway)")
+    except RuntimeError as e:
+        check("no usable file" in str(e).lower() or "refused every" in str(e).lower(),
+              "phantom download rejected -> " + str(e).splitlines()[0][:70])
+    finally:
+        sys.modules.pop("yt_dlp", None)
 
 print("\n" + "=" * 78)
 print(f"RESULT: {'ALL CHECKS PASSED' if FAILS == 0 else str(FAILS) + ' CHECK(S) FAILED'}")

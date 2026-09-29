@@ -18,7 +18,6 @@ the circuit, remaining chunks go straight to local).
 Results are cached as ``.srt`` files next to the output dir — re-running a
 campaign over the same sources does not re-spend quota or CPU.
 """
-import json
 import os
 import re
 import subprocess
@@ -31,6 +30,7 @@ from .config import (
     AUDIO_BITRATE,
     AUDIO_CHUNK_SECONDS,
     AUDIO_SAMPLE_RATE,
+    FFMPEG_TIMEOUT_SECONDS,
     GROQ_MAX_AUDIO_BYTES,
     LOCAL_WHISPER_MODEL,
     OUTPUT_DIR,
@@ -40,15 +40,30 @@ from .config import (
 )
 from .groq_client import transcribe_audio_groq
 from .local.whisper import transcribe_whisper_local
+from .safe_io import atomic_write_text
 
 
 # ---------------------------------------------------------------------------
 # .srt transcript cache (shared with reruns of the same source file)
 # ---------------------------------------------------------------------------
-def _transcript_cache_path(media_path: str) -> Path:
+def _transcript_cache_path(media_path: str, language: Optional[str] = None) -> Path:
+    """Cache file for this media+language pair.
+
+    The language MUST be part of the key. It was not, so transcribing a source
+    with --language hi and then re-running it with --language en returned the
+    cached HINDI transcript for the English request, silently and with no
+    warning. The suffix is omitted for auto-detect so existing caches written
+    by previous runs still hit.
+    """
     cache_dir = Path(OUTPUT_DIR)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / (Path(media_path).stem + ".srt")
+    stem = Path(media_path).stem
+    lang = (language or "").strip().lower()
+    if lang:
+        # keep it filesystem-safe: ISO codes only ever need [a-z-]
+        lang = "".join(ch for ch in lang if ch.isalnum() or ch == "-")[:8]
+        stem = f"{stem}.{lang}"
+    return cache_dir / (stem + ".srt")
 
 
 def _format_srt_timestamp(seconds: float) -> str:
@@ -70,8 +85,9 @@ def _parse_srt_timestamp(value: str) -> float:
     return hours * 3600 + minutes * 60 + seconds + (millis / 1000.0)
 
 
-def _write_srt_cache(media_path: str, transcript: Dict) -> Path:
-    cache_path = _transcript_cache_path(media_path)
+def _write_srt_cache(media_path: str, transcript: Dict,
+                     language: Optional[str] = None) -> Path:
+    cache_path = _transcript_cache_path(media_path, language)
     lines = []
     for idx, segment in enumerate(transcript.get("segments", []), start=1):
         start = _format_srt_timestamp(float(segment["start"]))
@@ -81,7 +97,11 @@ def _write_srt_cache(media_path: str, transcript: Dict) -> Path:
         lines.append(f"{start} --> {end}")
         lines.append(text)
         lines.append("")
-    cache_path.write_text("\n".join(lines), encoding="utf-8")
+    # ATOMIC: Path.write_text truncates first. A runner killed mid-write left
+    # a half-finished .srt whose LAST CUE WAS MISSING; it still parsed fine, so
+    # the next run happily reused a silently truncated transcript and every
+    # highlight after the cut point became invisible.
+    atomic_write_text(str(cache_path), "\n".join(lines))
     return cache_path
 
 
@@ -116,6 +136,23 @@ def _load_srt_cache(cache_path: Path) -> Dict:
 # ---------------------------------------------------------------------------
 # Audio extraction (ffmpeg must be installed — the deploy workflow does this)
 # ---------------------------------------------------------------------------
+def _run_ffmpeg(cmd: list, what: str) -> None:
+    """ffmpeg with a HARD timeout — an unbounded child can hang the whole job."""
+    try:
+        proc = subprocess.run(
+            cmd, check=False, timeout=FFMPEG_TIMEOUT_SECONDS,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffmpeg timed out after {FFMPEG_TIMEOUT_SECONDS:.0f}s during {what}"
+        ) from e
+    if proc.returncode != 0:
+        detail = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        tail = detail.splitlines()[-1][:300] if detail else "no stderr output"
+        raise RuntimeError(f"ffmpeg failed during {what} (exit {proc.returncode}): {tail}")
+
+
 def _extract_audio(media_path: str, out_path: str) -> str:
     """Downmix to a small mono mp3 — plenty for Whisper, tiny to upload."""
     cmd = [
@@ -128,7 +165,12 @@ def _extract_audio(media_path: str, out_path: str) -> str:
         "-b:a", AUDIO_BITRATE,
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    _run_ffmpeg(cmd, "audio extraction")
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError(
+            f"audio extraction produced an empty file from {media_path} — "
+            "the source has no decodable audio track"
+        )
     return out_path
 
 
@@ -146,7 +188,7 @@ def _split_audio(audio_path: str, chunk_dir: str) -> List[str]:
         "-b:a", AUDIO_BITRATE,
         pattern,
     ]
-    subprocess.run(cmd, check=True)
+    _run_ffmpeg(cmd, "audio chunking")
     chunks = sorted(
         os.path.join(chunk_dir, name)
         for name in os.listdir(chunk_dir)
@@ -251,7 +293,7 @@ def _shift_local(data: Dict, offset: float):
 # ---------------------------------------------------------------------------
 def transcribe(media_path: str, language: Optional[str] = None) -> Dict:
     """Transcribe a local media file with Groq Whisper (with .srt caching)."""
-    cache_path = _transcript_cache_path(media_path)
+    cache_path = _transcript_cache_path(media_path, language)
     if cache_path.exists() and cache_path.stat().st_mtime >= os.path.getmtime(media_path):
         try:
             cached = _load_srt_cache(cache_path)
@@ -297,6 +339,6 @@ def transcribe(media_path: str, language: Optional[str] = None) -> Dict:
 
     print(f"[transcribe] {len(segments)} segments, {duration:.0f}s of audio", flush=True)
     transcript = {"duration": duration, "segments": segments}
-    cache_path = _write_srt_cache(media_path, transcript)
+    cache_path = _write_srt_cache(media_path, transcript, language)
     print(f"[transcribe] wrote cache: {cache_path}", flush=True)
     return transcript
