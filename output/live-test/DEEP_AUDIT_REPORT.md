@@ -211,3 +211,104 @@ all return 403).
 Before re-running, consider setting `YTDLP_COOKIES_FILE`: item 3 above is the
 single most likely cause of a second failure, and the client rotation alone may
 not be enough.
+
+---
+
+# Addendum — second review pass, 2026-09-29
+
+Requested: a full re-verification with nothing skipped, then merge, then trigger.
+
+## 7. A SECOND run failed, and it was not in the original handoff
+
+`gh run list` surfaced run **`36517202871`** — the 00:00 UTC tick, which
+actually started at **03:27 UTC** (3.5 hours late; GitHub's scheduler is
+best-effort). It ran on `main @ a7898199`, i.e. **none of the fixes**, and died
+in **1.2 seconds**:
+
+```
+downloader.py line 131 -> ydl.extract_info(url, download=True)
+ERROR: [youtube] ULsyvuvg-NU: Sign in to confirm you're not a bot.
+```
+
+A single call, no fallback. Confirmed from the job log, and it also gave three
+facts worth recording verbatim from the live env dump:
+
+| Observed | Meaning |
+| --- | --- |
+| `UPLOAD_ENABLED: false`, `IG_UPLOAD_ENABLED: false`, all OAuth blank | uploads are definitively off — verified, not assumed |
+| `YT_COOKIES_B64:` empty, cookie step skipped | **no cookies are configured** |
+| `Cache not found for input keys: campaign-state-...` | the campaign cache is empty: the URL has **zero strikes** |
+| `opencv-python-headless-5.0.0.93` installed | the `<5` pin was not on `main` |
+
+## 8. The four open defects, measured against THIS video
+
+Rather than leave them as abstract risks, each was checked against the actual
+18:59 test video:
+
+| ID | Applies to this run? | Evidence |
+| --- | --- | --- |
+| **D7** chunk offset drift | **No** | The audio extracts to **4.6 MB** at 32 kbps/16 kHz mono, under the 25 MB Groq threshold, so `_split_audio` is never called. Forced anyway, measured drift was **+0.010 s** on chunk 2. |
+| **D10** clip overwrite | **No** | Every run writes to a fresh `campaign_<UTC-timestamp>/video_NNN/`. |
+| **D17** chunk loop | **No** | 1139 s < the 1200 s chunk size, so it is a single chunk. Step is 1140 s > 0, so no infinite loop regardless. |
+| **D27** upload RAM | **No** | Uploads are off. |
+
+None of the four endanger this live test.
+
+## 9. Full dress rehearsal on real media
+
+A **19-minute, 402 MB** source was rendered through the real pipeline with real
+ffmpeg, stubbing only the two network boundaries (Whisper and the LLM):
+
+```
+3 clips rendered  |  404x720, ratio 0.5611 (9:16 = 0.5625; 405 is odd, so
+                     even-rounding gives 404)  |  durations 28s / 32s / 27s
+#ad #sponsored present in the YT description AND the IG caption
+Hindi written readable, not \uXXXX-escaped
+[pipeline] removed source (421 MB)  -> no source_* survived
+```
+
+`scripts/verify_artifacts.py` on that output:
+
+```
+checks: 74 pass / 0 fail / 6 warn / 0 unverified / 13 info
+clip duration range: 27.00s - 32.00s
+VERDICT: PASS
+```
+
+The 6 warnings are cosmetic (title-length targets and hashtag counts from the
+stubbed LLM). A side observation: with OpenCV 5 in the sandbox the clipper
+**degraded to a static centre crop and did not crash**, which is the guard from
+`e3fa287` doing its job.
+
+## 10. Bot-check no longer costs a strike
+
+The old code charged one: the failed run logged *"2 attempt(s) left before
+strike-out"*. Verified against the current classifier:
+
+| Error | Strike? |
+| --- | --- |
+| raw yt-dlp bot check | **no strike** |
+| "refused every InnerTube client" | **no strike** |
+| private video | strike |
+| no detectable speech | strike |
+
+So repeated dispatches cannot retire the URL.
+
+## 11. Merged — and the trigger I could not do
+
+PR **#3** merged to `main` as **`55dc4f7`**. `main` now carries the client
+rotation and the `opencv<5` pin.
+
+**I could not start the run.** `gh workflow run` and the raw dispatches API both
+return `403 Resource not accessible by integration`, on `main` and on the arena
+branch. No run was created. The user has to press the button.
+
+Suites at merge time: `selftest_audit` 83/83, plus `selftest_downloader`,
+`selftest_clipper`, `selftest_pipeline` — all green. pyflakes clean.
+
+## 12. The honest odds on the next run
+
+The rotation is a reasoned mitigation, **not a proven one** — the sandbox cannot
+reach YouTube, so it has never faced a live bot check. Two consecutive runs were
+blocked in about a second each from GitHub's IP range. If the re-run fails the
+same way, the fix is `YT_COOKIES_B64`, not more code.
