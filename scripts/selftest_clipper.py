@@ -123,7 +123,6 @@ if not (have_ffmpeg and have_av):
 else:
     import subprocess
     import tempfile
-    import av
     from shorts_generator.local.clipper import _reframe_vertical
 
     with tempfile.TemporaryDirectory() as td:

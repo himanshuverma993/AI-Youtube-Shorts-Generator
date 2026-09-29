@@ -98,7 +98,6 @@ check("B3 untouched URLs keep their counts",
 
 # Simulate the crash window: with atomic_write the target is replaced in one
 # step, so a reader can never observe a partial ledger.
-import shorts_generator.safe_io as safe_io
 real_replace = os.replace
 os.replace = lambda *a, **k: (_ for _ in ()).throw(OSError("crash during rename"))
 try:
