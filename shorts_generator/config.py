@@ -78,6 +78,24 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "32k")       # mono speech mp3 for transcription
 AUDIO_SAMPLE_RATE = os.getenv("AUDIO_SAMPLE_RATE", "16000")
 
+# Hard ceiling on any single ffmpeg invocation. ffmpeg blocks FOREVER on a
+# truncated moov atom or an undemuxable stream, and an unbounded child process
+# turns a 5-minute clip job into a 240-minute timeout with zero artifacts.
+# 30 min is generous for re-encoding one 40-second clip; audio extraction from
+# a 3-hour source is the other realistic worst case and lands well inside it.
+FFMPEG_TIMEOUT_SECONDS = _env_float("FFMPEG_TIMEOUT", 1800)
+
+# DISK HYGIENE (GitHub runners ship ~14 GB free on /).
+# A 720p source is 100-200 MB for a 20-minute video and over 1 GB for a long
+# podcast. The campaign loop processes URLs sequentially, and nothing used to
+# delete the source after its clips were rendered — so a multi-URL run filled
+# the disk and killed the runner. Sources are now removed once their clips
+# exist; set KEEP_SOURCE_VIDEOS=true to retain them for local debugging.
+KEEP_SOURCE_VIDEOS = os.getenv("KEEP_SOURCE_VIDEOS", "false").strip().lower() == "true"
+# Refuse to start another video when free space drops below this. Failing
+# cleanly with a clear message beats ENOSPC surfacing as a corrupt mp4.
+MIN_FREE_DISK_MB = _env_int("MIN_FREE_DISK_MB", 2048)
+
 # ---------------------------------------------------------------------------
 # Local Whisper fallback (runs on THIS machine's CPU — zero API dependency)
 # If Groq Whisper is down or out of free-tier quota, transcription continues
@@ -195,8 +213,33 @@ IG_FEEDBACK_ENABLED = os.getenv("IG_FEEDBACK_ENABLED", "true").strip().lower() =
 
 # --------------------------------------------------------------------------
 # FTC compliance — appended to every generated description, no exceptions.
+#
+# This value is LOAD-BEARING FOR LEGAL COMPLIANCE, so it is not allowed to be
+# empty. `os.getenv(..., default).strip()` returned "" whenever the operator
+# exported FTC_DISCLOSURE_TAGS="" (or just spaces), and every enforcement site
+# in the codebase does `FTC_DISCLOSURE_TAGS.split()` → [] → "nothing missing"
+# → disclosure silently disappeared from every upload, with no warning.
+# An empty setting is therefore treated as a misconfiguration and refused.
 # --------------------------------------------------------------------------
-FTC_DISCLOSURE_TAGS = os.getenv("FTC_DISCLOSURE_TAGS", "#ad #sponsored").strip()
+FTC_DISCLOSURE_DEFAULT = "#ad #sponsored"
+
+
+def _sanitize_ftc_tags(raw: str) -> str:
+    """Normalise the disclosure tags, refusing to ever yield an empty set."""
+    tokens = [t.strip() for t in (raw or "").split() if t.strip()]
+    # Every disclosure token must actually be a hashtag; "ad" alone does not
+    # read as a disclosure on either platform.
+    tokens = [t if t.startswith("#") else f"#{t}" for t in tokens]
+    if not tokens:
+        print("[config] ⚠ FTC_DISCLOSURE_TAGS is empty — refusing to disable "
+              f"disclosure; falling back to {FTC_DISCLOSURE_DEFAULT!r}", flush=True)
+        return FTC_DISCLOSURE_DEFAULT
+    return " ".join(dict.fromkeys(tokens))       # de-dupe, keep order
+
+
+FTC_DISCLOSURE_TAGS = _sanitize_ftc_tags(
+    os.getenv("FTC_DISCLOSURE_TAGS", FTC_DISCLOSURE_DEFAULT)
+)
 
 
 def require_groq_key() -> str:

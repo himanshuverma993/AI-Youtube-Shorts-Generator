@@ -1,0 +1,54 @@
+{
+  "schema": "verify_artifacts/1",
+  "generated_at_utc": "2026-09-29T02:29:23.743275+00:00",
+  "artifacts_root": "output/live-test/artifacts",
+  "probe_backend": "builtin",
+  "expectations": {
+    "aspect_ratio": "9:16",
+    "target_ratio": 0.5625,
+    "ratio_tolerance": 0.02,
+    "duration_lock_s": [
+      20.0,
+      40.0
+    ],
+    "ftc_tags": [
+      "#ad",
+      "#sponsored"
+    ],
+    "ig_fold_line_max_chars": 60,
+    "yt_title_chars": [
+      40,
+      60
+    ]
+  },
+  "totals": {
+    "clips": 0,
+    "result_json": 0,
+    "summary_json": 0,
+    "checks_pass": 0,
+    "checks_fail": 1,
+    "checks_warn": 1,
+    "checks_info": 0,
+    "checks_unverified": 0
+  },
+  "duration_range_s": null,
+  "summaries": [],
+  "results": [],
+  "clips": [],
+  "checks": [
+    {
+      "scope": "environment",
+      "check": "ffprobe_available",
+      "status": "warn",
+      "detail": "ffprobe not on PATH — media facts come from the builtin MP4 parser"
+    },
+    {
+      "scope": "bundle",
+      "check": "clips_present",
+      "status": "fail",
+      "detail": "no short_*.mp4 anywhere in the bundle"
+    }
+  ],
+  "unverified": [],
+  "verdict": "NO_ARTIFACTS"
+}

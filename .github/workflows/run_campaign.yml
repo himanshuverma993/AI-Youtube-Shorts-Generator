@@ -45,6 +45,11 @@ concurrency:
 env:
   # secrets may not be referenced in step-level `if:` — mirror to env instead.
   YT_COOKIES_B64: ${{ secrets.YT_COOKIES_B64 }}
+  # Optional yt-dlp InnerTube client pin, e.g. "tv,web_safari". Empty = the
+  # built-in rotation in shorts_generator/local/downloader.py, which retries a
+  # bot-checked download under alternate clients before giving up. Job-level so
+  # the diagnostics step can report it too.
+  YTDLP_PLAYER_CLIENTS: ${{ vars.YTDLP_PLAYER_CLIENTS }}
 
 jobs:
   clip:
@@ -69,8 +74,11 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # --no-cache-dir: pip's wheel cache reached ~1 GB on this runner and
+          # the campaign needs that disk for source videos. Nothing here is
+          # reinstalled within a run, so the cache buys nothing.
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
 
       - name: Prepare directories
         run: mkdir -p output campaign
@@ -79,7 +87,14 @@ jobs:
         # Keeps the 4x/day cron runs from re-processing finished URLs, from
         # re-spending Groq Whisper quota on already-transcribed sources, and
         # from hammering permanently-failing URLs beyond their 3 strikes.
-        uses: actions/cache@v4
+        #
+        # restore/save are SPLIT on purpose. The old combined actions/cache@v4
+        # only saves in a post-step that GitHub skips once an earlier step
+        # fails (`save-always: false`), so run 36494468151 discarded everything
+        # it had learned — no "Cache saved with key" line appears in that log.
+        # The matching save step at the end of the job runs with `if: always()`.
+        id: campaign-state
+        uses: actions/cache/restore@v4
         with:
           path: |
             campaign/processed_urls.txt
@@ -100,11 +115,15 @@ jobs:
           restore-keys: |
             campaign-state-
 
-      - name: Cache tier-3 local model weights (llama.cpp + faster-whisper)
+      - name: Restore tier-3 local model weights (llama.cpp + faster-whisper)
         # The doomsday backends download ~2GB of GGUF weights once; a STICKY
         # static key means later runs reuse them instead of re-downloading.
         # Bump the -v1 suffix if LOCAL_LLM_REPO/FILE defaults ever change.
-        uses: actions/cache@v4
+        # Split restore/save for the same reason as the campaign state: the
+        # combined action's post-step is skipped when a later step fails, so a
+        # run that downloaded 2GB and then died threw all of it away.
+        id: model-weights
+        uses: actions/cache/restore@v4
         with:
           path: models
           key: local-model-weights-v1
@@ -170,7 +189,52 @@ jobs:
             python campaign_runner.py --urls-file campaign/urls.txt "${ARGS[@]}"
           fi
 
+      - name: Collect diagnostics
+        # Runs even when "Generate clips" fails. The 2026-09-28 live test
+        # (run 36494468151) died on a yt-dlp bot check and produced ZERO
+        # artifacts, because the upload step below is skipped on failure by
+        # default — so triage needed the raw runner logs. This step plus the
+        # `if: always()` on the upload guarantee the Artifacts panel always
+        # carries the campaign summary and the toolchain versions.
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p output/diagnostics
+          {
+            echo "run_id=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} event=${GITHUB_EVENT_NAME}"
+            echo "collected_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner=${RUNNER_OS} image=${ImageOS:-unknown}"
+            echo "python=$(python -V 2>&1)"
+            echo "yt_dlp=$(python -m yt_dlp --version 2>&1 | tail -1)"
+            echo "ffmpeg=$(ffmpeg -version 2>/dev/null | head -1)"
+            echo "cookies_configured=$([ -n "${YTDLP_COOKIES_FILE:-}" ] && echo yes || echo no)"
+            echo "player_clients=${YTDLP_PLAYER_CLIENTS:-<default rotation>}"
+            echo ""
+            # Disk is a real failure mode here: a 19-minute 720p source is
+            # ~300 MB and the runner starts with ~14 GB free. A run that dies
+            # with a confusing ffmpeg/OpenCV error is often just out of space,
+            # so capture the evidence instead of guessing.
+            echo "--- disk ---"
+            df -h / /home/runner 2>/dev/null | sed 's/^/  /'
+            echo "--- largest paths under output/ ---"
+            du -sh output/* 2>/dev/null | sort -rh | head -15 | sed 's/^/  /'
+            echo "--- source videos still on disk (should be none) ---"
+            ls -lh output/source_*.mp4 2>/dev/null | sed 's/^/  /' || echo "  none"
+          } > output/diagnostics/environment.txt
+          for f in campaign/failed_urls.txt campaign/processed_urls.txt; do
+            [ -f "$f" ] && cp "$f" output/diagnostics/ || true
+          done
+          find output -maxdepth 3 -type f \
+            \( -name 'summary.json' -o -name 'result_*.json' -o -name 'short_*.mp4' \) \
+            > output/diagnostics/manifest.txt 2>/dev/null || true
+          echo "--- diagnostics ---"
+          cat output/diagnostics/environment.txt
+
       - name: Upload clips + metadata JSON
+        # `always()` so a FAILED run still ships summary.json + diagnostics —
+        # without it a red run leaves nothing to download and the only
+        # evidence is the ephemeral runner log.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shorts-${{ github.run_number }}-${{ github.run_attempt }}
@@ -180,3 +244,53 @@ jobs:
             output/short_*.mp4
             output/result.json
             output/campaign_*/
+            output/diagnostics/
+
+      - name: Save tier-3 local model weights
+        # Only when the restore missed — the key is static, so re-saving an
+        # existing entry would just warn "cache already exists" every run.
+        if: always() && steps.model-weights.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: models
+          key: local-model-weights-v1
+
+      - name: Prune clips nothing is waiting to upload
+        # Ordering matters: this runs AFTER the artifact upload above, so the
+        # durable copy is already safe, and BEFORE the state cache below.
+        #
+        # The state cache persists output/campaign_*/video_*/short_*.mp4 so a
+        # queued upload can still find its file next tick. But the key is
+        # campaign-state-<run_id> — a NEW entry every run — and with uploads
+        # OFF nothing ever leaves the queues, so each tick re-cached the whole
+        # accumulated clip history. Four ticks a day walks that into the 10 GB
+        # per-repo cache limit and LRU eviction starts dumping the tier-3
+        # model weights, which are then re-downloaded every run.
+        if: always()
+        continue-on-error: true
+        run: python scripts/prune_state_cache.py
+
+      - name: Save campaign state (ledgers + transcript caches)
+        # `always()` is the whole point: a run that dies mid-way has still
+        # earned its transcript caches and ledger updates, and throwing them
+        # away means the next tick re-spends Groq quota from scratch.
+        # campaign_runner only strikes a URL for CONTENT failures, so a
+        # bot-check/outage persisted here cannot retire a good video.
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            campaign/processed_urls.txt
+            campaign/failed_urls.txt
+            campaign/posting_registry.json
+            campaign/feedback_stats.json
+            campaign/upload_queue.json
+            campaign/upload_ledger.json
+            campaign/ig_upload_queue.json
+            campaign/ig_token.json
+            output/*.srt
+            output/trend_context.json
+            output/campaign_*/video_*/short_*.mp4
+          key: campaign-state-${{ github.run_id }}

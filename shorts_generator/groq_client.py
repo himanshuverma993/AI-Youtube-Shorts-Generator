@@ -88,10 +88,23 @@ def get_cerebras_client():
 # ---------------------------------------------------------------------------
 # Retry engine — works for every Stainless-style SDK (groq, cerebras, openai)
 # ---------------------------------------------------------------------------
+@lru_cache(maxsize=1)
 def _sdk_exception_tuples() -> Tuple[tuple, tuple, tuple]:
     """Collect (rate_limit, server_error, connection_error) exception classes
     from whichever LLM SDKs are installed. An empty tuple in an `except ()`
-    clause is legal and simply never matches."""
+    clause is legal and simply never matches.
+
+    Cached: this used to re-import three modules on EVERY retry attempt of
+    every LLM call.
+
+    ``APITimeoutError`` is added explicitly to the connection bucket. It is a
+    subclass of ``APIConnectionError`` in current Stainless SDKs so it was
+    already covered transitively, but that inheritance is an implementation
+    detail of the SDK — naming it here means a future SDK reshuffle cannot
+    silently turn "request timed out" into an un-retried hard failure.
+    Stdlib/httpx transport errors are appended as a final safety net so a
+    socket reset never bypasses the retry loop either.
+    """
     rate_limited, server_error, conn_error = [], [], []
     for mod_name in ("groq", "cerebras.cloud.sdk", "openai"):
         try:
@@ -102,24 +115,57 @@ def _sdk_exception_tuples() -> Tuple[tuple, tuple, tuple]:
             (rate_limited, "RateLimitError"),
             (server_error, "APIStatusError"),
             (conn_error, "APIConnectionError"),
+            (conn_error, "APITimeoutError"),
         ):
             cls = getattr(mod, name, None)
             if isinstance(cls, type):
                 target.append(cls)
-    return tuple(rate_limited), tuple(server_error), tuple(conn_error)
+
+    # Transport-level fallbacks — present regardless of which SDK is loaded.
+    import socket
+    import ssl
+    conn_error.extend([socket.timeout, ssl.SSLError, ConnectionError, TimeoutError])
+    try:
+        import httpx  # type: ignore
+        conn_error.extend([httpx.TransportError, httpx.TimeoutException])
+    except Exception:
+        pass
+    # De-duplicate while keeping `except` tuple semantics intact.
+    return (tuple(dict.fromkeys(rate_limited)),
+            tuple(dict.fromkeys(server_error)),
+            tuple(dict.fromkeys(conn_error)))
+
+
+# A provider may answer a 429 with `Retry-After: 3600`. Obeying that inside a
+# 240-minute job is indistinguishable from a hang, and the tier below is very
+# likely healthy — so the hint is clamped and we fail over instead of waiting.
+MAX_RETRY_AFTER_SECONDS = 120.0
+# Whole-call ceiling. With 5 attempts the old ladder could sleep 10+20+40+80+
+# 120 = 270 s on TOP of 5 × GROQ_TIMEOUT_SECONDS (300 s) of request time —
+# almost 30 minutes for ONE prompt, on a pipeline that makes several per video.
+MAX_RETRY_WALL_SECONDS = 420.0
 
 
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
-    """Pull the provider's Retry-After hint out of a 429 response, if present."""
+    """Pull the provider's Retry-After hint out of a 429 response, if present.
+
+    Header lookup is case-insensitive: httpx.Headers is, but a plain dict from
+    a mocked/older client is NOT, and the two-key probe missed anything the
+    server sent as e.g. ``RETRY-AFTER``.
+    """
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None) or {}
-    for key in ("retry-after", "Retry-After"):
-        value = headers.get(key)
-        if value:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                continue
+    try:
+        items = headers.items()
+    except AttributeError:
+        return None
+    for key, value in items:
+        if str(key).lower() != "retry-after" or not value:
+            continue
+        try:
+            return max(0.0, min(float(value), MAX_RETRY_AFTER_SECONDS))
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -127,17 +173,21 @@ def _with_retry(fn, label: str):
     """Run ``fn`` with retries on rate limits and transient server/conn errors."""
     RATE_LIMITED, SERVER_ERROR, CONN_ERROR = _sdk_exception_tuples()
 
+    # GROQ_MAX_RETRIES comes from the environment. At 0 (or a negative), the
+    # old `range(1, 0)` was EMPTY: `fn` was never called even once, and the
+    # function raised "failed after 0 attempts: None" — a total, silent
+    # outage of every LLM tier caused by one stray env var.
+    attempts_allowed = max(1, GROQ_MAX_RETRIES)
+    started = time.monotonic()
     last_error: Optional[Exception] = None
-    for attempt in range(1, GROQ_MAX_RETRIES + 1):
+
+    for attempt in range(1, attempts_allowed + 1):
         try:
             return fn()
         except RATE_LIMITED as e:
             last_error = e
-            # Retry-After is authoritative on free tiers; back off beyond it slightly.
             wait = (_retry_after_seconds(e) or min(10 * (2 ** (attempt - 1)), 120)) + random.uniform(0.5, 2.0)
-            print(f"[llm] {label}: rate limited (attempt {attempt}/{GROQ_MAX_RETRIES}); "
-                  f"sleeping {wait:.0f}s", flush=True)
-            time.sleep(wait)
+            reason = "rate limited"
         except SERVER_ERROR as e:
             status = getattr(e, "status_code", 0) or 0
             # Retry transient 5xx; fail fast on other 4xx (bad key, bad request).
@@ -145,22 +195,49 @@ def _with_retry(fn, label: str):
                 raise
             last_error = e
             wait = min(10 * (2 ** (attempt - 1)), 120) + random.uniform(0.5, 2.0)
-            print(f"[llm] {label}: server error {status} (attempt {attempt}/{GROQ_MAX_RETRIES}); "
-                  f"sleeping {wait:.0f}s", flush=True)
-            time.sleep(wait)
+            reason = f"server error {status}"
         except CONN_ERROR as e:
             last_error = e
             wait = min(5 * (2 ** (attempt - 1)), 60) + random.uniform(0.2, 1.0)
-            print(f"[llm] {label}: connection error (attempt {attempt}/{GROQ_MAX_RETRIES}); "
-                  f"sleeping {wait:.0f}s", flush=True)
-            time.sleep(wait)
+            reason = "connection error"
+        else:  # pragma: no cover - defensive, `return` above covers success
+            break
 
-    raise RuntimeError(f"LLM call {label!r} failed after {GROQ_MAX_RETRIES} attempts: {last_error}")
+        if attempt >= attempts_allowed:
+            break
+        elapsed = time.monotonic() - started
+        if elapsed + wait > MAX_RETRY_WALL_SECONDS:
+            print(f"[llm] {label}: {reason}; retry budget "
+                  f"({MAX_RETRY_WALL_SECONDS:.0f}s) exhausted — failing over now",
+                  flush=True)
+            break
+        print(f"[llm] {label}: {reason} (attempt {attempt}/{attempts_allowed}); "
+              f"sleeping {wait:.0f}s", flush=True)
+        time.sleep(wait)
+
+    raise RuntimeError(f"LLM call {label!r} failed after {attempts_allowed} attempts: {last_error}")
 
 
 # ---------------------------------------------------------------------------
 # LLM backends + failover orchestrator
 # ---------------------------------------------------------------------------
+class EmptyCompletion(RuntimeError):
+    """A backend answered successfully but returned no usable content.
+
+    This is the FAILOVER-CHAIN HOLE that made tier-2/tier-3 unreachable in
+    practice. ``_chat_call`` ended with ``... .content or ""``, so a model
+    that returned an empty string, a content-filtered response, or a
+    zero-length ``choices`` list looked like a *successful* call. ``call_llm``
+    returned "" to its caller, the Cerebras and local tiers were NEVER tried,
+    and the failure surfaced far away as ``json.JSONDecodeError`` inside
+    ``_parse_json_loose`` — which the highlight stage then "handled" by
+    retrying the SAME dead backend three more times.
+
+    Raising instead means an empty answer is a hard tier failure, exactly like
+    a 500, and the identical prompt replays on the next backend.
+    """
+
+
 def _chat_call(client, model: str, prompt: str) -> str:
     response = client.chat.completions.create(
         model=model,
@@ -171,7 +248,17 @@ def _chat_call(client, model: str, prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
     )
-    return response.choices[0].message.content or ""
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        raise EmptyCompletion(f"{model} returned no choices")
+    message = getattr(choices[0], "message", None)
+    content = (getattr(message, "content", None) or "").strip()
+    if not content:
+        finish = getattr(choices[0], "finish_reason", None) or "unknown"
+        raise EmptyCompletion(
+            f"{model} returned empty content (finish_reason={finish})"
+        )
+    return content
 
 
 def call_groq_llm(prompt: str) -> str:
@@ -270,15 +357,29 @@ def call_llm(prompt: str) -> str:
         print("[llm] ⛰ DOOMSDAY TIER: running prompt on local CPU model "
               "(slower — needs no keys, no accounts, no API uptime)…", flush=True)
         try:
-            return call_local_llm(prompt)
+            text = (call_local_llm(prompt) or "").strip()
+            if not text:
+                # Same contract as the cloud tiers: an empty answer is a
+                # failure, not a result. Returning "" here would hand an
+                # unparseable payload to the caller with no tier left to blame.
+                raise EmptyCompletion("local model returned empty content")
+            return text
         except Exception as e:
             raise RuntimeError(
                 f"All LLM tiers failed — clouds ({last_error}) — local tier ({e})"
             ) from e
 
-    # local tier disabled: surface the real cloud error like the old path did
-    assert last_error is not None
-    raise last_error
+    # Local tier disabled: surface the real cloud error like the old path did.
+    # This used to be `assert last_error is not None` followed by `raise
+    # last_error`. Under `python -O` asserts are STRIPPED, so a None would
+    # have become `raise None` → "TypeError: exceptions must derive from
+    # BaseException", burying the actual cause.
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(
+        "No LLM tier was reachable: Groq is circuit-broken, Cerebras is not "
+        "configured, and the local tier is disabled (LOCAL_LLM=false)."
+    )
 
 
 # ---------------------------------------------------------------------------

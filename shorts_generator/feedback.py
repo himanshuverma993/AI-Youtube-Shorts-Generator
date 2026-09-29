@@ -29,6 +29,8 @@ import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional
 
+from .http_retry import RetryPolicy, json_request
+from .safe_io import atomic_write_json
 from .config import (
     FEEDBACK_ENABLED,
     FEEDBACK_MIN_AGE_HOURS,
@@ -112,9 +114,10 @@ def load_registry(path: str = REGISTRY_PATH) -> Dict:
 
 
 def save_registry(registry: Dict, path: str = REGISTRY_PATH) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(registry, f, ensure_ascii=False, indent=1)
+    # ATOMIC: the posting registry is the ONLY record that a clip was ever
+    # published. Truncating it mid-write loses upload history permanently and
+    # the feedback loop silently restarts from zero measured posts.
+    atomic_write_json(path, registry, indent=1)
 
 
 def register_post(
@@ -164,18 +167,23 @@ def register_post(
 # ---------------------------------------------------------------------------
 # Stats fetching (YouTube Analytics — channel-owner OAuth, free)
 # ---------------------------------------------------------------------------
+# Google's OAuth token endpoint and the Analytics API both return 500/503
+# under load. This helper had NO exception handling whatsoever, so a single
+# transient blip raised urllib.error.HTTPError straight through
+# _mint_access_token into the YouTube uploader's queue loop, where it was
+# counted as an UPLOAD FAILURE and spent one of the clip's three strikes.
+# Three unlucky ticks struck out a perfectly good clip that had never even
+# reached YouTube. Now every call retries 408/429/5xx and transport errors
+# with exponential backoff, and only a genuine 4xx fails fast.
+_FEEDBACK_POLICY = RetryPolicy(attempts=4, base_delay=2.0, max_delay=30.0,
+                               total_budget=150.0, timeout=_HTTP_TIMEOUT)
+
+
 def _http_json(url: str, params: Optional[Dict] = None, headers: Optional[Dict] = None,
                method: str = "GET", form: Optional[Dict] = None) -> Dict:
-    """Stdlib JSON-over-HTTP helper. Split out so tests can patch it."""
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(url, method=method, headers=headers or {})
-    data = None
-    if form is not None:
-        data = urllib.parse.urlencode(form).encode("utf-8")
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    with urllib.request.urlopen(req, data=data, timeout=_HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """JSON-over-HTTP with retries. Split out so tests can patch it."""
+    return json_request(url, method=method, params=params, headers=headers,
+                        form=form, policy=_FEEDBACK_POLICY)
 
 
 def _mint_access_token() -> str:
@@ -346,9 +354,7 @@ def refresh_feedback_stats(registry: Optional[Dict] = None,
         },
         "posts": sorted(all_posts, key=lambda r: r["score"], reverse=True),
     }
-    os.makedirs(os.path.dirname(stats_path) or ".", exist_ok=True)
-    with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=1)
+    atomic_write_json(stats_path, stats, indent=1)
     return stats
 
 
@@ -411,6 +417,26 @@ def build_feedback_block(stats: Dict, for_stage: str = "highlights") -> str:
     return "\n".join(lines)
 
 
+# Per-process stats cache. The pipeline asks for a feedback block TWICE per
+# video (once for the highlight stage, once for metadata), and each call used
+# to re-run refresh_feedback_stats: a fresh OAuth token mint, a full YouTube
+# Analytics report, and one Graph API insights request PER registered IG post.
+# On a 10-URL campaign that is 20 token mints and up to 2,000 IG calls for
+# data that cannot meaningfully change inside a single run.
+_STATS_CACHE: Dict[str, Dict] = {}
+_STATS_CACHE_TTL = 900.0        # 15 min — far longer than any single run stage
+
+
+def _cached_stats(registry_path: str, stats_path: str) -> Dict:
+    key = f"{registry_path}|{stats_path}"
+    hit = _STATS_CACHE.get(key)
+    if hit and (time.time() - hit["at"]) < _STATS_CACHE_TTL:
+        return hit["stats"]
+    stats = refresh_feedback_stats(registry_path=registry_path, stats_path=stats_path)
+    _STATS_CACHE[key] = {"at": time.time(), "stats": stats}
+    return stats
+
+
 def get_feedback_block(for_stage: str = "highlights",
                        registry_path: str = REGISTRY_PATH,
                        stats_path: str = STATS_PATH) -> str:
@@ -419,7 +445,7 @@ def get_feedback_block(for_stage: str = "highlights",
     if not feedback_configured():
         return ""
     try:
-        stats = refresh_feedback_stats(registry_path=registry_path, stats_path=stats_path)
+        stats = _cached_stats(registry_path, stats_path)
     except Exception as e:
         print(f"[feedback] stats refresh failed ({e}) — proceeding WITHOUT feedback context", flush=True)
         stats = load_feedback_stats(stats_path)

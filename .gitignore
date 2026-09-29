@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-output/
+output/*
 logs/
 *.mp4
 .DS_Store
@@ -19,4 +19,9 @@ campaign/ig_token.json
 
 # Local model weights (tier-3 LLM + whisper) and run artifacts
 models/
-output/
+
+# ...except the live clipping-test evidence bundle, which is a committed
+# report, not a run artifact. Text only: the downloaded artifact payloads
+# and any rendered video underneath stay ignored (*.mp4 above still wins).
+!output/live-test/
+output/live-test/artifacts/

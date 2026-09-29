@@ -2,11 +2,35 @@
 # fallback) + faster-whisper (transcription fallback) + llama.cpp (tier-3
 # local LLM) — all local backends run on the runner's own CPU. Installs
 # cleanly on stock ubuntu-latest runners.
-groq>=0.11.0
-cerebras-cloud-sdk>=1.0.0
-python-dotenv>=1.0
-yt-dlp>=2024.8.6
-opencv-python-headless>=4.8.0
-faster-whisper>=1.0.0
-huggingface-hub>=0.24.0
-llama-cpp-python>=0.2.80
+#
+# MAJOR VERSIONS ARE CAPPED ON PURPOSE.
+# These are unattended cron installs: pip resolves the floor to whatever is
+# newest at run time, so an upstream major release lands in production with no
+# human in the loop. That is exactly how the 2026-09-28 run broke —
+# "opencv-python-headless>=4.8.0" quietly pulled OpenCV 5.0.0.93, which had
+# removed cv2.CascadeClassifier and shipped no Haar cascades, so every 9:16
+# reframe would have died on AttributeError.
+# Each cap below is the next major after a version verified to work. Raise a
+# cap deliberately, after testing — never by deleting it.
+
+groq>=0.11.0,<2                   # verified 1.7.0
+cerebras-cloud-sdk>=1.0.0,<2      # verified 1.91.0
+python-dotenv>=1.0,<2             # verified 1.2.3
+
+# DELIBERATELY UNCAPPED. yt-dlp ships YouTube anti-bot/extractor fixes
+# continuously and uses CalVer, so pinning it is what breaks downloads, not
+# what protects them. It must float to the newest release.
+yt-dlp>=2024.8.6                  # verified 2026.8.19
+
+# PINNED <5. OpenCV 5.0 removed cv2.CascadeClassifier entirely and ships an
+# EMPTY cv2/data/ (no haarcascade_*.xml), so the face-aware 9:16 reframe in
+# local/clipper.py dies with
+#     AttributeError: module 'cv2' has no attribute 'CascadeClassifier'
+# 4.14.0 is the newest release that still provides the detector and cascades.
+# local/clipper.py also degrades to a centre crop if a detector is ever
+# missing, but that costs framing quality — keep the pin.
+opencv-python-headless>=4.8.0,<5  # verified 4.14.0.94
+
+faster-whisper>=1.0.0,<2          # verified 1.2.1
+huggingface-hub>=0.24.0,<2        # verified 1.33.0 (1.x kept hf_hub_download(local_dir=))
+llama-cpp-python>=0.2.80,<1       # verified 0.3.35 (0.x — cap at the 1.0 major)

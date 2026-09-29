@@ -7,7 +7,6 @@ Usage:
 Stack: yt-dlp + Groq Whisper + Groq Llama + ffmpeg/OpenCV — $0 cost.
 """
 import argparse
-import json
 import sys
 
 # Windows uses 'charmap' by default, which can't encode Unicode characters
@@ -18,6 +17,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from shorts_generator import generate_shorts
+from shorts_generator.safe_io import atomic_write_json
 
 
 def main() -> int:
@@ -66,9 +66,18 @@ def main() -> int:
         else:
             print(f"     clip:   FAILED ({s.get('error')})")
 
+    # "shorts" now holds ONLY rendered clips, so render losses would otherwise
+    # be invisible in the CLI — the run would look perfect while silently
+    # dropping clips.
+    for f in result.get("failed_clips") or []:
+        print(f"\n!!  RENDER FAILED  {f.get('title', '(untitled)')}: {f.get('error')}")
+
     if args.output_json:
-        with open(args.output_json, "w") as f:
-            json.dump(result, f, indent=2)
+        # open(..., "w") with NO encoding used the platform default, which is
+        # cp1252 on Windows — writing a Hindi title raised UnicodeEncodeError
+        # and lost the entire result after a successful multi-minute render.
+        # Atomic + explicit UTF-8 + unescaped Unicode.
+        atomic_write_json(args.output_json, result, indent=2)
         print(f"\nFull JSON written to {args.output_json}")
 
     return 0

@@ -13,7 +13,8 @@ from typing import Dict, List, Optional
 
 from .highlights import get_highlights
 from .local.clipper import crop_highlights_local
-from .local.downloader import download_youtube_local
+from .config import KEEP_SOURCE_VIDEOS
+from .local.downloader import download_youtube_local, is_downloaded_source
 from .metadata import generate_metadata
 from .transcriber import transcribe
 from .trends import get_trend_block
@@ -56,9 +57,16 @@ def generate_shorts(
           "source_video_url": str,       # local path of the downloaded source
           "transcript": {...},
           "highlights": [...],           # all candidates ranked
-          "shorts": [...],               # top `num_clips` with clip_url (local
-                                         # path) + FTC-compliant metadata
+          "shorts": [...],               # ONLY successfully rendered clips,
+                                         # each with clip_url (local path) +
+                                         # FTC-compliant metadata
+          "failed_clips": [...],         # highlights whose render failed,
+                                         # each with its "error" string
         }
+
+    Raises:
+        RuntimeError: if the source has no speech, the highlight generator
+            returns nothing, or EVERY clip fails to render.
     """
     # Optional guidance layers (Phase-1 trends + Phase-2 feedback): framing
     # bias only, "" when disabled or in trouble — generation never blocked.
@@ -66,7 +74,38 @@ def generate_shorts(
     context_metadata = _context_for_stage("metadata")
 
     source_path = download_youtube_local(youtube_url, fmt=download_format)
+    try:
+        return _generate_from_source(
+            source_path, youtube_url, num_clips, aspect_ratio, language,
+            output_dir, context_highlights, context_metadata,
+        )
+    finally:
+        # DISK: drop the full-resolution source as soon as its clips exist.
+        # `main.py` runs one video per process so this is the only chance to
+        # reclaim it; `campaign_runner` also sweeps between URLs. Guarded by
+        # is_downloaded_source so a user-supplied local input is NEVER deleted.
+        if not KEEP_SOURCE_VIDEOS and is_downloaded_source(source_path):
+            try:
+                size = os.path.getsize(source_path)
+                os.remove(source_path)
+                print(f"[pipeline] 🧹 removed source ({size / 1e6:.0f} MB): "
+                      f"{source_path}", flush=True)
+            except OSError as e:
+                print(f"[pipeline] ⚠ could not remove source ({e})", flush=True)
 
+
+def _generate_from_source(
+    source_path: str,
+    youtube_url: str,
+    num_clips: int,
+    aspect_ratio: str,
+    language: Optional[str],
+    output_dir: Optional[str],
+    context_highlights: str,
+    context_metadata: str,
+) -> Dict:
+    """Everything after the download — split out so the caller can guarantee
+    the source file is reclaimed on every exit path."""
     transcript = transcribe(source_path, language=language)
     if not transcript["segments"]:
         raise RuntimeError(
@@ -83,11 +122,33 @@ def generate_shorts(
     top = sorted(all_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
     print(f"[pipeline] cropping {len(top)} of {len(all_highlights)} candidates", flush=True)
 
-    shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio, out_dir=output_dir)
+    cropped = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio, out_dir=output_dir)
 
-    # Phase-1 Fix 1: platform-split metadata (YouTube + Instagram payloads per
-    # clip), FTC disclosure appended in code on every path.
-    shorts = generate_metadata(shorts, transcript=transcript, context_block=context_metadata)
+    # crop_highlights_local NEVER raises — it records per-clip failures as
+    # {"clip_url": None, "error": ...} so one bad highlight can't sink the
+    # batch. That means the caller MUST separate them out: leaving the
+    # placeholders in "shorts" made a run where every single render failed
+    # look like a success (campaign_runner counted len(shorts), marked the URL
+    # processed for good, and shipped zero files).
+    rendered = [c for c in cropped if c.get("clip_url")]
+    failed_clips = [c for c in cropped if not c.get("clip_url")]
+
+    if failed_clips:
+        print(f"[pipeline] ⚠ {len(failed_clips)}/{len(cropped)} clip(s) failed to render:",
+              flush=True)
+        for c in failed_clips:
+            print(f"[pipeline]    - {c.get('title', '(untitled)')}: {c.get('error')}", flush=True)
+
+    if not rendered:
+        first_error = failed_clips[0].get("error") if failed_clips else "unknown error"
+        raise RuntimeError(
+            f"All {len(cropped)} clip(s) failed to render — no shorts produced. "
+            f"First error: {first_error}"
+        )
+
+    # Only rendered clips go to the LLM: metadata for a file that does not
+    # exist is wasted quota and pollutes the upload queue.
+    shorts = generate_metadata(rendered, transcript=transcript, context_block=context_metadata)
 
     write_metadata_sidecars(shorts)
 
@@ -96,6 +157,9 @@ def generate_shorts(
         "transcript": transcript,
         "highlights": all_highlights,
         "shorts": shorts,
+        # Rendering losses stay visible to the artifact/summary layer instead
+        # of masquerading as successful clips.
+        "failed_clips": failed_clips,
     }
 
 

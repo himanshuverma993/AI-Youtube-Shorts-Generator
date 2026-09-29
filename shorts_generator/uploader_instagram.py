@@ -23,6 +23,7 @@ import urllib.request
 from typing import Dict, List, Optional
 
 from .config import (
+    FTC_DISCLOSURE_TAGS,
     IG_ACCESS_TOKEN,
     IG_APP_ID,
     IG_APP_SECRET,
@@ -35,6 +36,9 @@ from .config import (
     IG_USER_ID,
 )
 from .feedback import register_post
+from .http_retry import RetryPolicy, json_request
+from .metadata import _enforce_disclosure
+from .safe_io import atomic_write_json, read_json_safe
 
 IG_QUEUE_PATH = os.path.join("campaign", "ig_upload_queue.json")
 IG_TOKEN_STORE = os.path.join("campaign", "ig_token.json")
@@ -54,25 +58,23 @@ def ig_uploads_configured() -> bool:
 def _stored_token(store_path: Optional[str] = IG_TOKEN_STORE) -> Optional[str]:
     if not store_path:
         return None
-    try:
-        with open(store_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):  # adversarial pass: valid JSON ≠ valid shape
-            token = data.get("token")
-            if token:
-                return token
-    except (OSError, ValueError):
-        pass
+    data = read_json_safe(store_path)
+    if isinstance(data, dict):  # adversarial pass: valid JSON ≠ valid shape
+        token = data.get("token")
+        if token:
+            return token
     return None
 
 
 def _save_token(token: str, store_path: Optional[str] = IG_TOKEN_STORE) -> None:
     if not store_path:
         return
-    os.makedirs(os.path.dirname(store_path) or ".", exist_ok=True)
-    with open(store_path, "w", encoding="utf-8") as f:
-        json.dump({"token": token, "saved_epoch": time.time(),
-                   "saved_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}, f)
+    # ATOMIC: losing this file means falling back to the 60-day seed token,
+    # which eventually lapses and fails every upload to strike-out.
+    atomic_write_json(store_path, {
+        "token": token, "saved_epoch": time.time(),
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+    }, indent=None)
 
 
 def ig_access_token(store_path: str = IG_TOKEN_STORE) -> str:
@@ -88,11 +90,14 @@ def roll_token_forward(store_path: str = IG_TOKEN_STORE) -> Optional[str]:
     Returns the new token or None (caller keeps using the old one)."""
     token = _stored_token(store_path)
     if token:
+        # FD LEAK: this was `json.load(open(store_path))` with no context
+        # manager — the handle was only closed by refcounting, and not at all
+        # on a non-CPython runtime.
+        saved = read_json_safe(store_path, {}) or {}
         try:
-            saved = json.load(open(store_path, encoding="utf-8"))
             if time.time() - float(saved.get("saved_epoch", 0)) < 30 * 86400:
                 return token  # fresh enough — don't churn exchanges
-        except Exception:
+        except (TypeError, ValueError):
             pass
     token = token or IG_ACCESS_TOKEN
     if not token:
@@ -121,21 +126,21 @@ def roll_token_forward(store_path: str = IG_TOKEN_STORE) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # stdlib HTTP helpers (Graph + GitHub) — split out for test patching
 # ---------------------------------------------------------------------------
+# The Facebook Graph API is notorious for transient 500/502 and for
+# "(#2) An unexpected error has occurred" under load, and a release-asset
+# upload to GitHub can reset mid-stream. One attempt with only HTTPError
+# caught meant any of those spent one of the reel's three strikes.
+# json_request keeps the same security property as before: the error message
+# uses the REDACTED url, because the fb_exchange_token grant carries
+# client_secret in the query string and these logs are public.
+_IG_POLICY = RetryPolicy(attempts=4, base_delay=3.0, max_delay=45.0,
+                         total_budget=300.0, timeout=_HTTP_TIMEOUT)
+
+
 def _http_json(url: str, method: str = "GET", params: Optional[Dict] = None,
                headers: Optional[Dict] = None, body: bytes = b"") -> Dict:
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(url, method=method, data=body or None, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as e:
-        payload = e.read().decode("utf-8", "replace")[:500]
-        # AUDIT F14 (security): NEVER echo query params in errors — calls like
-        # the fb_exchange_token grant carry fb_exchange_token + client_secret
-        # in the URL, and this message is printed to (PUBLIC-repo) CI logs.
-        safe_url = url.split("?")[0]
-        raise RuntimeError(f"HTTP {e.code} for {safe_url}: {payload}") from e
+    return json_request(url, method=method, params=params, headers=headers,
+                        body=body, policy=_IG_POLICY)
 
 
 def _graph_json(method: str, path: str, params: Optional[Dict] = None,
@@ -224,16 +229,31 @@ def _delete_asset(asset_id: int, release: Dict) -> None:
 # ---------------------------------------------------------------------------
 # IG container → publish flow
 # ---------------------------------------------------------------------------
+IG_CAPTION_MAX = 2200            # Instagram hard limit; over it the API 400s
+
+
 def _build_ig_caption(meta: Dict) -> str:
-    """Caption + hashtag line, deduped at TAG level (a tag the caption already
-    contains — e.g. FTC's #ad #sponsored — is never double-printed; trailing
-    punctuation like '#money,' still counts as present)."""
-    caption = (meta.get("caption") or "").strip()
-    present = {tok.rstrip(",.;:!\"'") for tok in caption.split()}
-    missing = [t for t in (meta.get("hashtags") or [])
-               if str(t).strip() and str(t).rstrip(",.;:!\"'") not in present]
+    """Caption + hashtag line, deduped at TAG level.
+
+    FTC: disclosure is re-enforced HERE for the same reason as the YouTube
+    snippet builder. ``enqueue_ig_uploads`` will happily queue an item whose
+    ``instagram`` payload is ``{}`` (it only validates ``clip_path``), and
+    that used to publish a Reel with a completely EMPTY caption — no #ad, no
+    #sponsored, nothing. Generation-time enforcement cannot cover a queue item
+    that never went through generation.
+    """
+    caption = _enforce_disclosure((meta.get("caption") or "").strip())
+    present = {tok.lower().rstrip(",.;:!?\"'") for tok in caption.split()}
+    missing = [str(t).strip() for t in (meta.get("hashtags") or [])
+               if str(t).strip()
+               and str(t).strip().lower().rstrip(",.;:!?\"'") not in present]
     if missing:
         caption = f"{caption}\n\n{' '.join(missing)}".strip()
+    if len(caption) > IG_CAPTION_MAX:
+        # Trim the body but keep the disclosure — it must survive truncation.
+        disclosure = " ".join(FTC_DISCLOSURE_TAGS.split())
+        keep = IG_CAPTION_MAX - len(disclosure) - 2
+        caption = f"{caption[:max(0, keep)].rstrip()}\n{disclosure}"
     return caption
 
 
@@ -251,16 +271,46 @@ def _create_container(media_url: str, caption: str, token: str, user_id: str) ->
 
 
 def _wait_container_ready(creation_id: str, token: str) -> None:
+    """Poll until Instagram finishes transcoding the Reel.
+
+    A failed POLL is not a failed UPLOAD. Any exception from the status call
+    used to abort the whole publish — while the container carried on
+    processing server-side — so a single Graph blip both struck the clip AND
+    risked a later duplicate. Transient poll errors are now tolerated up to a
+    consecutive-failure budget; only a real ERROR/EXPIRED status or the
+    overall deadline aborts.
+    """
     deadline = time.time() + IG_CONTAINER_TIMEOUT_SECONDS
+    consecutive_errors = 0
+    max_consecutive_errors = 5
+    last_error: Optional[BaseException] = None
     while time.time() < deadline:
-        data = _graph_json("GET", f"/{creation_id}", params={"fields": "status_code"}, token=token)
+        try:
+            data = _graph_json("GET", f"/{creation_id}",
+                               params={"fields": "status_code"}, token=token)
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            last_error = e
+            if consecutive_errors >= max_consecutive_errors:
+                raise RuntimeError(
+                    f"IG container {creation_id}: {consecutive_errors} consecutive "
+                    f"status checks failed (last: {e})"
+                ) from e
+            print(f"[ig] status check failed ({e}) — {consecutive_errors}/"
+                  f"{max_consecutive_errors} before giving up", flush=True)
+            time.sleep(IG_CONTAINER_POLL_SECONDS)
+            continue
         status = data.get("status_code")
         if status == "FINISHED":
             return
         if status in ("ERROR", "EXPIRED"):
             raise RuntimeError(f"IG container {creation_id} reported {status}")
         time.sleep(IG_CONTAINER_POLL_SECONDS)
-    raise RuntimeError(f"IG container {creation_id} not ready after {IG_CONTAINER_TIMEOUT_SECONDS}s")
+    raise RuntimeError(
+        f"IG container {creation_id} not ready after {IG_CONTAINER_TIMEOUT_SECONDS}s"
+        + (f" (last poll error: {last_error})" if last_error else "")
+    )
 
 
 def _publish_container(creation_id: str, token: str, user_id: str) -> str:
@@ -297,20 +347,15 @@ def upload_reel(clip_path: str, meta: Dict, token_store: str = IG_TOKEN_STORE) -
 # Queue (same rituals as the YouTube queue)
 # ---------------------------------------------------------------------------
 def _load_queue(path: str = IG_QUEUE_PATH) -> Dict:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get("items"), list):
-            return data
-    except (OSError, ValueError):
-        pass
+    data = read_json_safe(path)
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        return data
     return {"items": []}
 
 
 def _save_queue(queue: Dict, path: str = IG_QUEUE_PATH) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(queue, f, ensure_ascii=False, indent=1)
+    # ATOMIC: see uploader_youtube._save_queue.
+    atomic_write_json(path, queue, indent=1)
 
 
 def enqueue_ig_uploads(shorts: List[Dict], source_url: str = "", path: str = IG_QUEUE_PATH) -> int:
@@ -368,8 +413,32 @@ def process_ig_upload_queue(queue_path: str = IG_QUEUE_PATH,
             result["dropped_missing_file"] += 1
             print(f"[ig] 🗑 {os.path.basename(item.get('clip_path', '?'))} gone with the runner — dropped, no strike", flush=True)
             continue
+        # DUPLICATE-POST GUARD — identical reasoning to the YouTube queue: a
+        # register_post failure after a SUCCESSFUL publish used to re-queue the
+        # item and post the same Reel again on the next run.
         try:
             media_id = upload_reel(item["clip_path"], item.get("instagram") or {}, token_store=token_store)
+        except Exception as e:
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            result["failed_attempts"] += 1
+            if item["attempts"] >= IG_MAX_ATTEMPTS:
+                print(f"[ig] ❌ {os.path.basename(item.get('clip_path','?'))} failed "
+                      f"{item['attempts']}× (last: {e}) — struck out", flush=True)
+            else:
+                print(f"[ig] ⚠ {os.path.basename(item.get('clip_path','?'))} failed ({e}); retry next run", flush=True)
+                remaining.append(item)
+            continue
+
+        # Published. Persist the shrunken queue BEFORE any bookkeeping so a
+        # crash here cannot republish the Reel.
+        budget -= 1
+        result["uploaded"] += 1
+        queue["items"] = remaining + [
+            it for it in queue.get("items", [])
+            if it is not item and it.get("clip_path") != item.get("clip_path")
+        ]
+        _save_queue(queue, queue_path)
+        try:
             register_post(
                 platform="instagram",
                 video_id=str(media_id),
@@ -386,17 +455,9 @@ def process_ig_upload_queue(queue_path: str = IG_QUEUE_PATH,
                 clip_end=item.get("clip_end"),
                 path=registry_path,
             )
-            budget -= 1
-            result["uploaded"] += 1
         except Exception as e:
-            item["attempts"] = int(item.get("attempts", 0)) + 1
-            result["failed_attempts"] += 1
-            if item["attempts"] >= IG_MAX_ATTEMPTS:
-                print(f"[ig] ❌ {os.path.basename(item.get('clip_path','?'))} failed "
-                      f"{item['attempts']}× (last: {e}) — struck out", flush=True)
-            else:
-                print(f"[ig] ⚠ {os.path.basename(item.get('clip_path','?'))} failed ({e}); retry next run", flush=True)
-                remaining.append(item)
+            print(f"[ig] ⚠ {media_id} published but NOT registered ({e}) — "
+                  f"the feedback loop will not measure it", flush=True)
 
     queue["items"] = remaining
     result["queued"] = len(remaining)

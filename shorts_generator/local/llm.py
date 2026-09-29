@@ -116,6 +116,35 @@ def _model():
     )
 
 
+# Qwen/Llama-class models use BYTE-level BPE, so the stable unit is bytes per
+# token, not characters per token. ~3.6 bytes/token is a conservative figure
+# for these vocabularies across scripts.
+_BYTES_PER_TOKEN = 3.6
+
+
+def _chars_per_token(text: str) -> float:
+    """Estimate the chars-per-token ratio for THIS text's script.
+
+    The old budget assumed a flat 4 chars/token. That holds for English, but
+    these tokenizers are byte-level: a Devanagari character costs 3 UTF-8
+    bytes, so Hindi lands near 1.2 chars/token — the old estimate
+    over-budgeted a Hindi prompt by roughly 3x. A transcript that "fit"
+    therefore blew past n_ctx, and llama.cpp either errored out or dropped the
+    schema tail, making the doomsday tier useless on exactly the content this
+    campaign processes.
+
+    Deriving it from the sample's real bytes-per-character handles Devanagari,
+    Arabic, CJK and emoji without a per-script table. Sampled, because these
+    prompts can be megabytes.
+    """
+    sample = text[:4000]
+    if not sample:
+        return _BYTES_PER_TOKEN
+    bytes_per_char = len(sample.encode("utf-8")) / len(sample)
+    # Clamp: never promise more than plain-ASCII density, never below 1.0.
+    return max(1.0, min(_BYTES_PER_TOKEN, _BYTES_PER_TOKEN / bytes_per_char))
+
+
 def _fit_prompt_to_ctx(prompt: str, max_tokens: int) -> str:
     """Keep head+tail, cut the MIDDLE if the prompt would overflow n_ctx.
 
@@ -124,9 +153,14 @@ def _fit_prompt_to_ctx(prompt: str, max_tokens: int) -> str:
     but preserves the instructions the model still needs. Logged loudly —
     doomsday tier degrades visibly, never silently.
     """
-    budget_chars = max((LOCAL_LLM_CTX - max_tokens - 128) * 4 - len(_LOCAL_SYSTEM_MESSAGE), 2000)
+    cpt = _chars_per_token(prompt)
+    budget_chars = max(
+        int((LOCAL_LLM_CTX - max_tokens - 128) * cpt) - len(_LOCAL_SYSTEM_MESSAGE),
+        2000,
+    )
     if len(prompt) <= budget_chars:
         return prompt
+    print(f"[llm/local] script density ≈ {cpt:.1f} chars/token", flush=True)
     head = int(budget_chars * 0.35)
     tail = budget_chars - head
     print(f"[llm/local] ⚠ prompt {len(prompt)} chars > ctx budget {budget_chars} — "
