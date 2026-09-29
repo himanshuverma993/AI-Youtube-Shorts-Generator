@@ -146,6 +146,73 @@ else:
         check(not [p for p in os.listdir(td) if p.endswith(".silent.mp4")],
               "temp .silent.mp4 cleaned up")
 
+print("\nT6: degenerate source properties must raise a CLEAR error, not arithmetic noise")
+import tempfile
+from shorts_generator.local import clipper as _clipper
+
+
+class _FakeCap:
+    """Stands in for cv2.VideoCapture: opens fine, reports garbage properties."""
+
+    def __init__(self, w, h, fps, frames=0):
+        self._p = {cv2.CAP_PROP_FRAME_WIDTH: w, cv2.CAP_PROP_FRAME_HEIGHT: h,
+                   cv2.CAP_PROP_FPS: fps}
+        self._left = frames
+        self.released = False
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return self._p.get(prop, 0)
+
+    def read(self):
+        return (False, None)
+
+    def release(self):
+        self.released = True
+
+
+def _reframe_with(cap, path="/tmp/_selftest_out.mp4"):
+    saved = cv2.VideoCapture
+    cv2.VideoCapture = lambda *a, **k: cap
+    try:
+        return _clipper._reframe_vertical("/tmp/_selftest_in.mp4", path, "9:16")
+    finally:
+        cv2.VideoCapture = saved
+
+
+for label, cap in [
+    ("height 0  (old code: ZeroDivisionError)", _FakeCap(1920, 0, 25.0)),
+    ("width 0",                                 _FakeCap(0, 1080, 25.0)),
+]:
+    c = cap
+    try:
+        _reframe_with(c)
+        check(False, f"{label} -> should have raised")
+    except ZeroDivisionError:
+        check(False, f"{label} -> still ZeroDivisionError (guard missing)")
+    except RuntimeError as e:
+        ok = "unreadable frame size" in str(e)
+        check(ok, f"{label} -> RuntimeError: {str(e)[:58]}...")
+        check(c.released, f"{label} -> VideoCapture released (no fd leak)")
+    except Exception as e:
+        check(False, f"{label} -> unexpected {type(e).__name__}: {e}")
+
+print("\nT7: a source that decodes ZERO frames must not emit a silent dud clip")
+cap = _FakeCap(1280, 720, 25.0, frames=0)   # valid geometry, but read() gives nothing
+with tempfile.TemporaryDirectory() as td:
+    out = os.path.join(td, "out.mp4")
+    try:
+        _reframe_with(cap, out)
+        check(False, "zero-frame source -> should have raised")
+    except RuntimeError as e:
+        check("no frames could be decoded" in str(e),
+              f"zero-frame source -> RuntimeError: {str(e)[:56]}...")
+        check(not os.path.exists(out + ".silent.mp4"), "temp .silent.mp4 removed on this path")
+    except Exception as e:
+        check(False, f"zero-frame source -> unexpected {type(e).__name__}: {e}")
+
 print("\n" + "=" * 78)
 print(f"RESULT: {'ALL CHECKS PASSED' if FAILS == 0 else str(FAILS) + ' CHECK(S) FAILED'}"
       + (f"  ({SKIPS} skipped)" if SKIPS else ""))

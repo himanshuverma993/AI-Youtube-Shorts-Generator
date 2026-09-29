@@ -84,7 +84,14 @@ jobs:
         # Keeps the 4x/day cron runs from re-processing finished URLs, from
         # re-spending Groq Whisper quota on already-transcribed sources, and
         # from hammering permanently-failing URLs beyond their 3 strikes.
-        uses: actions/cache@v4
+        #
+        # restore/save are SPLIT on purpose. The old combined actions/cache@v4
+        # only saves in a post-step that GitHub skips once an earlier step
+        # fails (`save-always: false`), so run 36494468151 discarded everything
+        # it had learned — no "Cache saved with key" line appears in that log.
+        # The matching save step at the end of the job runs with `if: always()`.
+        id: campaign-state
+        uses: actions/cache/restore@v4
         with:
           path: |
             campaign/processed_urls.txt
@@ -105,11 +112,15 @@ jobs:
           restore-keys: |
             campaign-state-
 
-      - name: Cache tier-3 local model weights (llama.cpp + faster-whisper)
+      - name: Restore tier-3 local model weights (llama.cpp + faster-whisper)
         # The doomsday backends download ~2GB of GGUF weights once; a STICKY
         # static key means later runs reuse them instead of re-downloading.
         # Bump the -v1 suffix if LOCAL_LLM_REPO/FILE defaults ever change.
-        uses: actions/cache@v4
+        # Split restore/save for the same reason as the campaign state: the
+        # combined action's post-step is skipped when a later step fails, so a
+        # run that downloaded 2GB and then died threw all of it away.
+        id: model-weights
+        uses: actions/cache/restore@v4
         with:
           path: models
           key: local-model-weights-v1
@@ -204,6 +215,40 @@ jobs:
             > output/diagnostics/manifest.txt 2>/dev/null || true
           echo "--- diagnostics ---"
           cat output/diagnostics/environment.txt
+
+      - name: Save tier-3 local model weights
+        # Only when the restore missed — the key is static, so re-saving an
+        # existing entry would just warn "cache already exists" every run.
+        if: always() && steps.model-weights.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: models
+          key: local-model-weights-v1
+
+      - name: Save campaign state (ledgers + transcript caches)
+        # `always()` is the whole point: a run that dies mid-way has still
+        # earned its transcript caches and ledger updates, and throwing them
+        # away means the next tick re-spends Groq quota from scratch.
+        # campaign_runner only strikes a URL for CONTENT failures, so a
+        # bot-check/outage persisted here cannot retire a good video.
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            campaign/processed_urls.txt
+            campaign/failed_urls.txt
+            campaign/posting_registry.json
+            campaign/feedback_stats.json
+            campaign/upload_queue.json
+            campaign/upload_ledger.json
+            campaign/ig_upload_queue.json
+            campaign/ig_token.json
+            output/*.srt
+            output/trend_context.json
+            output/campaign_*/video_*/short_*.mp4
+          key: campaign-state-${{ github.run_id }}
 
       - name: Upload clips + metadata JSON
         # `always()` so a FAILED run still ships summary.json + diagnostics —

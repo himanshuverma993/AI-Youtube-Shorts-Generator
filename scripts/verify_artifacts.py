@@ -456,6 +456,22 @@ def verify_result_json(rep: Report, path: Path, root: Path) -> Dict[str, Any]:
     rep.add(scope, "shorts_array", "pass", f"{len(shorts)} entries", value=len(shorts))
     rec["shorts"] = len(shorts)
 
+    # pipeline.generate_shorts reports highlights whose render failed here
+    # instead of leaving them in "shorts" with a null clip_url. Surface them:
+    # a run can be green overall and still have silently lost clips.
+    failed_clips = data.get("failed_clips")
+    if isinstance(failed_clips, list) and failed_clips:
+        rec["failed_clips"] = len(failed_clips)
+        for fc in failed_clips:
+            if isinstance(fc, dict):
+                rep.add(scope, "clip_render_failure", "warn",
+                        f"{fc.get('title', '(untitled)')}: {str(fc.get('error'))[:200]}")
+    elif failed_clips is None:
+        rep.add(scope, "failed_clips_key", "info",
+                "no 'failed_clips' key (pre-fix pipeline, or nothing failed)")
+    else:
+        rep.add(scope, "clip_render_failure", "pass", "no clips failed to render")
+
     transcript = data.get("transcript")
     if isinstance(transcript, dict):
         segs = transcript.get("segments")

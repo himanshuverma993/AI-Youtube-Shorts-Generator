@@ -411,3 +411,142 @@ DownloadError: Unable to download API page: TLS/SSL ... -> _is_client_blocked = 
 **Still unverifiable until a green run:** Groq Whisper on Hindi audio, hook quality
 (natural vs garbled), Hindi metadata text integrity, and whether face tracking frames TMKOC's
 multi-person scenes sensibly.
+
+---
+
+# 9. FULL BUG SWEEP — everything found is now fixed
+
+After the OpenCV find I stopped trusting "it probably works" and audited the whole hot path.
+**Seven** defects total. Each one below was **reproduced first**, then fixed, then locked behind a
+regression test. Nothing here is theoretical.
+
+| # | Defect | Severity | Proof it was real | Status |
+|---|---|---|---|---|
+| **B1** | YouTube bot-check kills the run, no retry | 🔴 blocker | run 36494468151 log | fixed `f7fd71d` |
+| **B2** | Failed run uploads **zero** artifacts | 🟠 blind spot | `total_count: 0` | fixed `f7fd71d` |
+| **B3** | OpenCV 5 removed `CascadeClassifier` → crop dies | 🔴 blocker | reproduced on real 5.0.0.93 | fixed `e3fa287` |
+| **B4** | Unrendered clips counted as successful shorts | 🔴 data loss | reproduced, see below | fixed — `fix: close the remaining 5 audit defects` |
+| **B5** | Infra failures burned 3-strike attempts | 🟠 retires good videos | code + log | fixed — `fix: close the remaining 5 audit defects` |
+| **B6** | Cache never saved on a failed run | 🟠 wasted quota | no "Cache saved" line | fixed — `fix: close the remaining 5 audit defects` |
+| **B7** | Degenerate video props crash / emit dud clips | 🟠 latent | reproduced | fixed — `fix: close the remaining 5 audit defects` |
+| **B8** | Every dependency floor unpinned (caused B3) | 🔴 systemic | B3 *is* the proof | fixed — `fix: close the remaining 5 audit defects` |
+
+## B4 — silent clip loss reported as success 🔴
+
+`crop_highlights_local` deliberately never raises; it returns placeholders so one bad highlight
+can't sink the batch:
+
+```python
+except Exception as e:
+    results.append({**h, "clip_url": None, "error": str(e)})
+```
+
+Nothing downstream filtered them. Reproduced by forcing every render to fail:
+
+```
+crop_highlights_local returned 2 entries:
+   clip_url= None | error= ffmpeg exploded
+   clip_url= None | error= ffmpeg exploded
+  actually rendered: 0   reported to campaign as: 2
+```
+
+`campaign_runner` then did `summaries.append({"shorts": len(result["shorts"])})` → **"2 shorts"**,
+called `mark_processed(url)` → **URL retired permanently**, and the run went **green with zero
+files on disk**. A whole video silently lost, never retried.
+
+**Fix:** `pipeline.generate_shorts` now splits rendered from failed. `shorts` contains only real
+clips; losses go to a new `failed_clips` key and are logged. If *every* clip fails it raises, so
+the URL is retried instead of retired. Metadata is no longer generated for files that don't
+exist (that was also wasted LLM quota).
+
+## B5 — infra failures retired healthy videos 🟠
+
+`MAX_FAILED_ATTEMPTS = 3` could not tell "YouTube bot-checked a datacenter IP" from "this video
+has no speech". Three unlucky cron ticks and a perfectly good URL is skipped forever.
+
+**Fix:** `campaign_runner.is_transient_failure()`. Bot-check, connection resets, timeouts, SSL,
+429/5xx, rate limits → logged, retried forever, **no strike**. Content failures (no speech, zero
+highlights, private/removed video, all renders failed) → strike as designed. 13 assertions cover
+the split, including the U+2019 smart quote in yt-dlp's *"you’re not a bot"*.
+
+## B6 — the cache was never written on a failed run 🟠
+
+Both `actions/cache@v4` steps echoed `save-always: false`, their post-steps reported
+`conclusion: skipped`, and the log has **no `Cache saved with key` line anywhere**. So a run that
+dies mid-way throws away its transcript `.srt` caches, its ledgers — and, for the model cache,
+~2GB of GGUF weights it had just downloaded.
+
+**Fix:** both caches split into `actions/cache/restore@v4` + `actions/cache/save@v4` with
+`if: always()`. Verified the restore and save path lists are byte-identical (11/11), and that no
+combined `actions/cache@` step remains. The weights save additionally runs only on a restore miss
+(static key) to avoid a "cache already exists" warning every run. This is only safe *because* B5
+is fixed — persisting the ledger cannot now retire a video over an outage.
+
+## B7 — degenerate video properties 🟠
+
+Three separate holes in `_reframe_vertical`, all reproduced:
+
+```
+src_h == 0          -> ZeroDivisionError: division by zero     (traceback blamed arithmetic)
+cap.get(FPS) = NaN  -> `raw or 30.0` passes NaN straight through (NaN is truthy!)
+VideoWriter(nan fps).isOpened() -> False, and write() then silently discards every frame
+```
+
+**Fix:** frame size validated with a clear error, `_sane_fps()` clamps to 1–240 (rejecting NaN,
+inf, negative, absurd, and non-numeric), `writer.isOpened()` checked, frame counter added so a
+zero-frame decode raises instead of shipping a dud, and `VideoCapture` is released on every path.
+
+## B8 — unpinned dependency floors (the systemic cause of B3) 🔴
+
+Every requirement was a bare `>=` floor. These are **unattended cron installs**: pip resolves to
+whatever is newest at run time, so an upstream major lands in production with no human involved.
+That is exactly how OpenCV 5 got in.
+
+**Fix:** major caps on everything, each annotated with the version actually tested, and each
+resolution verified:
+
+```
+groq>=0.11.0,<2              -> 1.7.0        faster-whisper>=1.0.0,<2   -> 1.2.1
+cerebras-cloud-sdk>=1.0.0,<2 -> 1.91.0       huggingface-hub>=0.24.0,<2 -> 1.33.0
+python-dotenv>=1.0,<2        -> 1.2.3        llama-cpp-python>=0.2.80,<1-> 0.3.35
+opencv-python-headless>=4.8.0,<5 -> 4.14.0.94 (was 5.0.0.93)
+yt-dlp>=2024.8.6             -> 2026.8.19    DELIBERATELY UNCAPPED
+```
+
+`yt-dlp` stays uncapped on purpose — it ships YouTube anti-bot fixes continuously on CalVer, so
+pinning it is what *breaks* downloads.
+
+## Regression suite — runs offline, no keys, no network
+
+```
+scripts/selftest_downloader.py ... 13 assertions   bot-check rotation + classification
+scripts/selftest_clipper.py ...... 17 assertions   OpenCV 4 AND 5, degenerate inputs, real render
+scripts/selftest_pipeline.py ..... 28 assertions   render accounting, strike split, fps clamping
+scripts/verify_artifacts.py ...... artifact bundle verifier (also reports failed_clips now)
+```
+
+Final sweep, all green:
+
+```
+py_compile every tracked .py ....................... OK
+selftest_downloader / clipper / pipeline ........... ALL CHECKS PASSED (exit 0)
+verify_artifacts vs planted-defect fixture ......... 8 defects caught, exit 1 (correct)
+verify_artifacts vs empty bundle ................... exit 2 NO_ARTIFACTS (correct)
+diagnostics step under bash -e, no yt_dlp/ffmpeg ... exit 0
+workflow YAML ...................................... valid; 0 legacy actions/cache@ left
+UPLOAD_ENABLED / IG_UPLOAD_ENABLED / YT_PRIVACY .... zero changes across the whole branch
+```
+
+## What is STILL not verified — unchanged, and I won't pretend otherwise
+
+- **No live YouTube download has happened.** YouTube is unreachable from this sandbox; the
+  rotation is proven by unit tests and by real `yt_dlp` accepting the client names, not by a
+  successful download.
+- **Groq Whisper has never run** on this or any source here. Hindi quality is unknown.
+- **Hook quality, Hindi text integrity, metadata** — still zero data.
+- **Face tracking on TMKOC's multi-person framing** — the crop is proven to *work*; whether it
+  picks the *right* face in a 5-person Gokuldham scene is a judgement call only real output can
+  settle.
+
+The rerun is still the real test, and it still needs your hands: the agent token is **HTTP 403 on
+workflow dispatch**.

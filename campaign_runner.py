@@ -35,6 +35,46 @@ from shorts_generator.config import OUTPUT_DIR
 # ledger stops the 4x/day cron from re-burning quota on hopeless sources.
 MAX_FAILED_ATTEMPTS = 3
 
+# Failures that say "the runner had a bad day", NOT "this URL is hopeless".
+# Striking these out would permanently retire a perfectly good video because
+# YouTube happened to bot-check a datacenter IP, or because Groq had a blip.
+# They are logged and retried forever; only content-level failures count as
+# strikes. Matched case-insensitively against str(exception).
+TRANSIENT_ERROR_MARKERS = (
+    "sign in to confirm",
+    "not a bot",
+    "cookies-from-browser",
+    "refused every innertube client",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "max retries exceeded",
+    "remote end closed connection",
+    "ssl",
+    "429",
+    "too many requests",
+    "rate limit",
+    "500 server error",
+    "502",
+    "503",
+    "504",
+    "service unavailable",
+    "internal server error",
+)
+
+
+def is_transient_failure(exc: BaseException) -> bool:
+    """True when a failure is infrastructure/anti-bot rather than the URL.
+
+    Smart quotes are flattened first: yt-dlp writes "you\u2019re not a bot"
+    with U+2019, which a plain substring test would miss.
+    """
+    msg = str(exc).replace("\u2019", "'").replace("\u2018", "'").lower()
+    return any(marker in msg for marker in TRANSIENT_ERROR_MARKERS)
+
 
 def read_urls(path: str) -> list:
     """Active (non-comment, non-blank) URLs from the campaign file."""
@@ -214,18 +254,30 @@ def main() -> int:
                 print(f"[campaign] ⚠ enqueue skipped ({ue}) — clips stay as artifacts", flush=True)
             print(f"[campaign] ✅ done → {json_path}", flush=True)
         except Exception as e:  # keep the campaign going; retried next run
-            new_count = attempts.get(url, 0) + 1
-            bump_failed_attempt(args.failed_log, url, new_count)
-            attempts[url] = new_count
             failed += 1
-            remaining = MAX_FAILED_ATTEMPTS - new_count
-            summaries.append({"url": url, "status": "failed", "error": str(e),
-                              "failed_attempts": new_count})
+            transient = is_transient_failure(e)
             print(f"[campaign] ❌ failed: {e}", flush=True)
-            if remaining > 0:
-                print(f"[campaign] will retry next run ({remaining} attempt(s) left before strike-out)", flush=True)
+
+            if transient:
+                # Infra/anti-bot problem — do NOT spend a strike, or a healthy
+                # video gets retired for something that was never its fault.
+                current = attempts.get(url, 0)
+                summaries.append({"url": url, "status": "failed", "error": str(e),
+                                  "failed_attempts": current, "transient": True})
+                print(f"[campaign] transient/infra failure — no strike spent "
+                      f"(still {current}/{MAX_FAILED_ATTEMPTS}); will retry next run",
+                      flush=True)
             else:
-                print(f"[campaign] strike {new_count}/{MAX_FAILED_ATTEMPTS} reached — URL permanently skipped from now on", flush=True)
+                new_count = attempts.get(url, 0) + 1
+                bump_failed_attempt(args.failed_log, url, new_count)
+                attempts[url] = new_count
+                remaining = MAX_FAILED_ATTEMPTS - new_count
+                summaries.append({"url": url, "status": "failed", "error": str(e),
+                                  "failed_attempts": new_count, "transient": False})
+                if remaining > 0:
+                    print(f"[campaign] will retry next run ({remaining} attempt(s) left before strike-out)", flush=True)
+                else:
+                    print(f"[campaign] strike {new_count}/{MAX_FAILED_ATTEMPTS} reached — URL permanently skipped from now on", flush=True)
             traceback.print_exc()
 
     uploads_summary = None

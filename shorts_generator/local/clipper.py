@@ -6,11 +6,34 @@ Two stages per highlight:
      window horizontally across the frame to keep faces centred (Haar
      cascade — same approach as the original repo, no external models).
 """
+import math
 import os
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from ..config import OUTPUT_DIR
+
+# A reframe writer fed a nonsense frame rate fails to open and then silently
+# swallows every frame, producing a 0-byte video and a baffling ffmpeg mux
+# error three steps later. Clamp to something a container can actually store.
+FPS_MIN, FPS_MAX, FPS_DEFAULT = 1.0, 240.0, 30.0
+
+
+def _sane_fps(raw, default: float = FPS_DEFAULT) -> float:
+    """Coerce OpenCV's CAP_PROP_FPS into a value VideoWriter will accept.
+
+    ``cap.get()`` happily returns 0.0, NaN, a negative, or an absurd value for
+    containers with a broken/variable frame rate. The old ``raw or 30.0`` only
+    caught 0.0 — NaN is truthy, so it sailed straight through into VideoWriter.
+    """
+    try:
+        fps = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(fps) or fps < FPS_MIN or fps > FPS_MAX:
+        return default
+    return fps
+
 
 
 def _ratio(aspect_ratio: str) -> float:
@@ -95,7 +118,17 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
 
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps = _sane_fps(cap.get(cv2.CAP_PROP_FPS))
+
+    # isOpened() can be True while the properties are still garbage (broken
+    # header, 0-byte cut). Without this, src_w / src_h raises ZeroDivisionError
+    # and the traceback points at arithmetic instead of at the real cause.
+    if src_w <= 0 or src_h <= 0:
+        cap.release()
+        raise RuntimeError(
+            f"unreadable frame size {src_w}x{src_h} in {in_path} — the cut step "
+            "probably produced an empty/corrupt file"
+        )
 
     # Compute the largest crop that fits inside the frame at the target ratio.
     if target_ratio < src_w / src_h:
@@ -112,7 +145,16 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     silent_path = out_path + ".silent.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(silent_path, fourcc, fps, (crop_w, crop_h))
+    # A VideoWriter that failed to open accepts write() calls and discards
+    # them, so the failure only surfaces later as an inscrutable ffmpeg error.
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(
+            f"OpenCV could not open a VideoWriter for {silent_path} "
+            f"({crop_w}x{crop_h} @ {fps}fps, mp4v)"
+        )
 
+    frames_written = 0
     last_center: Optional[Tuple[int, int]] = None
     smoothing = 0.15  # how aggressively to chase a new face position
     while True:
@@ -146,9 +188,17 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
         y0 = max(0, min(src_h - crop_h, cy - crop_h // 2))
         cropped = frame[y0:y0 + crop_h, x0:x0 + crop_w]
         writer.write(cropped)
+        frames_written += 1
 
     cap.release()
     writer.release()
+
+    # Zero frames means the mux below would emit a 0-length or malformed clip
+    # that still "succeeds". Fail loudly here instead of shipping a dud short.
+    if frames_written == 0:
+        if os.path.exists(silent_path):
+            os.remove(silent_path)
+        raise RuntimeError(f"no frames could be decoded from {in_path}")
 
     # Mux audio from the cut clip back onto the silent reframed video.
     cmd = [

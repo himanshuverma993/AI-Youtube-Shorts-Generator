@@ -1,6 +1,6 @@
 {
   "schema": "verify_artifacts/1",
-  "generated_at_utc": "2026-09-29T02:04:51.904214+00:00",
+  "generated_at_utc": "2026-09-29T02:29:23.743275+00:00",
   "artifacts_root": "output/live-test/artifacts",
   "probe_backend": "builtin",
   "expectations": {
