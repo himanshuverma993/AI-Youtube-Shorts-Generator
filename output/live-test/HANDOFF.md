@@ -1,6 +1,6 @@
 # LIVE CLIPPING TEST #1 — RESULT ANALYSIS
 
-**Bottom line (Hinglish):** Test **FAIL** hua. **0 clips bane.** Pipeline download step par hi
+**Bottom line (Hinglish):** Test **FAIL** hua. **0 clips bane.** **DO root cause the** — bot-check, aur uske peechhe chhupa hua OpenCV 5 wala crash (§8). Pipeline download step par hi
 mar gaya — YouTube ne GitHub runner ke datacenter IP ko bot-check kar diya. Groq Whisper,
 highlights, 9:16 crop, metadata — **in mein se kuch bhi chala hi nahi**, isliye hook quality /
 Hindi natural hai ya garbled, ye main **verify nahi kar sakta**. Guess nahi karunga.
@@ -18,7 +18,7 @@ Uploads **definitely nahi hue** — wo watermark log mein verbatim mil gaya.
 | Clips produced | **0** |
 | Artifacts | **0** (`total_count: 0`) |
 | Uploads | **0** — confirmed off |
-| Verdict | **FAIL — infra/anti-bot, not a pipeline logic bug** |
+| Verdict | **FAIL — YouTube bot-check** (+ a 2nd latent blocker found after: OpenCV 5 breaks the 9:16 crop — see §8) |
 
 Raw evidence: [`run_36494468151_excerpt.log`](run_36494468151_excerpt.log) ·
 Machine report: [`report.json`](report.json)
@@ -290,3 +290,124 @@ Live YouTube download ......................... ❌ NOT TESTED — YouTube unrea
 
 **Only after a green run can hook quality, Hindi text integrity, 9:16 framing and metadata be
 judged. Until then those remain unverified — not "probably fine".**
+
+---
+
+# 8. FOLLOW-UP (2026-09-29 ~02:30 UTC) — second root cause found
+
+## 8.1 I cannot trigger the rerun myself
+
+```
+$ gh workflow run run_campaign.yml --ref arena/01a0ead9-ai-youtube-shorts-generator
+could not create workflow dispatch event: HTTP 403: Resource not accessible by integration
+
+$ gh api -X POST .../actions/workflows/run_campaign.yml/dispatches -f ref=arena/...
+{"message":"Resource not accessible by integration","status":"403"}
+
+$ gh api repos/:owner/:repo --jq '{permissions}'
+{"permissions":{"admin":false,"maintain":false,"pull":false,"push":false,"triage":false}}
+```
+
+The agent token is **read-only on Actions** — it can read runs, logs and artifacts, but cannot
+dispatch. **You have to press the button.** No new run exists (still `total_count: 1` at 02:30 UTC;
+the 2026-09-29 00:00 tick never fired either).
+
+So instead of waiting, I audited what the *next* run would hit. It would have failed again — for a
+completely different reason.
+
+## 8.2 🔴 ROOT CAUSE #2 — OpenCV 5 breaks the 9:16 crop (would have killed the next run)
+
+`requirements.txt` asked for `opencv-python-headless>=4.8.0` — an **unpinned floor**. On
+2026-09-28 pip resolved that to **`opencv-python-headless-5.0.0.93`** (verbatim from the run log,
+section [A] of the excerpt). OpenCV 5 is a **breaking major release**:
+
+```
+$ python -c "import cv2, os; print(cv2.__version__); \
+    print('CascadeClassifier:', hasattr(cv2,'CascadeClassifier')); \
+    print('cv2/data:', os.listdir(cv2.data.haarcascades))"
+5.0.0
+CascadeClassifier: False
+cv2/data: ['__init__.py', '__pycache__']        <-- every haarcascade_*.xml is GONE
+```
+
+`local/clipper.py` did this unconditionally:
+
+```python
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+# AttributeError: module 'cv2' has no attribute 'CascadeClassifier'
+```
+
+**Every clip would have died at the reframe step.** The bot-check just got there first — it masked
+this completely. Verified against both versions installed for real:
+
+| OpenCV | `cv2.CascadeClassifier` | bundled cascades | old code | fixed code |
+|---|---|---|---|---|
+| 5.0.0.93 (what ran) | **absent** | **none** | 💥 `AttributeError` | ✅ warns, centre-crops, renders |
+| 4.14.0 (now pinned) | present | present | ✅ | ✅ face tracking active |
+
+### Fix
+* `requirements.txt` → **`opencv-python-headless>=4.8.0,<5`** (4.14.0 is the newest release that
+  still ships the detector), with a comment so nobody "helpfully" unpins it.
+* `local/clipper.py` → new `_load_face_cascade()` guard. If the detector is unavailable **for any
+  reason**, it prints a warning and falls back to a static centre crop. A future wheel bump can
+  now degrade clip quality, but can no longer destroy a whole run.
+
+### 9:16 crop is now actually proven to work — first time
+Rendered end-to-end with real ffmpeg on both OpenCV versions:
+
+```
+1920x1080 source -> 606x1080   ratio 0.5611  (target 0.5625, tol 0.02)  audio muxed OK
+1280x720  source -> 404x720    ratio 0.5611  audio muxed OK, temp .silent.mp4 cleaned up
+```
+
+(The 0.5611 vs 0.5625 drift is the even-pixel rounding in `_reframe_vertical`; the verifier's
+0.02 tolerance was already calibrated for it.)
+
+## 8.3 Dependency audit — everything else is clean
+
+Same unpinned-floor risk applies to every other requirement, so I installed the runner's **exact**
+resolved versions and smoke-tested:
+
+```
+groq 1.7.0 ............... OK  chat.completions + audio.transcriptions present
+faster-whisper 1.2.1 ..... OK  WhisperModel(device=, compute_type=) intact
+huggingface-hub 1.33.0 ... OK  hf_hub_download(local_dir=) intact
+numpy 2.2.6 .............. OK
+all 14 shorts_generator modules import cleanly
+FAILURES: none
+```
+
+Only OpenCV was the breaker.
+
+## 8.4 yt-dlp client names validated against the runner's exact version
+
+The rotation is worthless if the client names are wrong, so I checked them against
+`yt-dlp==2026.8.19` — the version the runner installed:
+
+```
+supported: android, android_vr, ios, mweb, tv, tv_downgraded, tv_simply,
+           visionos, web, web_creator, web_embedded, web_music, web_safari
+my chain:  tv_simply OK | android_vr OK | tv OK | web_safari OK | mweb OK     INVALID: none
+```
+
+Real `yt_dlp.YoutubeDL` accepts the exact `extractor_args` dict for all five. And a genuine
+**network** error is correctly classified as *not* a bot-check, so a flaky runner blip costs
+**1 attempt, not 6**:
+
+```
+DownloadError: Unable to download API page: TLS/SSL ... -> _is_client_blocked = False  ✅
+```
+
+## 8.5 Updated status
+
+| | |
+|---|---|
+| Root causes found | **2** — (1) YouTube bot-check, (2) OpenCV 5 breaking the crop |
+| Both fixed | yes, on `arena/01a0ead9-ai-youtube-shorts-generator` |
+| Live-download proof | ❌ still none — YouTube unreachable from the sandbox |
+| Crop proof | ✅ rendered for real, both OpenCV majors |
+| Rerun | ⛔ **blocked on you** — agent token is 403 on workflow dispatch |
+
+**Still unverifiable until a green run:** Groq Whisper on Hindi audio, hook quality
+(natural vs garbled), Hindi metadata text integrity, and whether face tracking frames TMKOC's
+multi-person scenes sensibly.

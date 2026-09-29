@@ -44,6 +44,40 @@ def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> s
     return out_path
 
 
+def _load_face_cascade(cv2):
+    """Return a Haar face detector, or None if this OpenCV cannot supply one.
+
+    OpenCV 5.0 removed ``cv2.CascadeClassifier`` and ships an empty
+    ``cv2/data/`` directory, so the old unconditional call raised
+    ``AttributeError`` and killed the whole render. requirements.txt now pins
+    ``<5``, but a future wheel resolution must degrade to a static centre crop
+    instead of destroying an otherwise-good run — so this never raises.
+    """
+    version = getattr(cv2, "__version__", "?")
+    if not hasattr(cv2, "CascadeClassifier"):
+        print(f"[clip] ⚠ OpenCV {version} has no CascadeClassifier — face tracking OFF, "
+              "using a static centre crop (pin opencv-python-headless<5 to restore it)",
+              flush=True)
+        return None
+
+    cascade_dir = getattr(getattr(cv2, "data", None), "haarcascades", "") or ""
+    path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
+    if not cascade_dir or not os.path.exists(path):
+        print(f"[clip] ⚠ OpenCV {version} ships no bundled Haar cascades — face tracking OFF, "
+              "using a static centre crop", flush=True)
+        return None
+
+    try:
+        cascade = cv2.CascadeClassifier(path)
+        if cascade.empty():
+            raise RuntimeError("cascade loaded empty")
+    except Exception as e:  # noqa: BLE001 - never let detector setup kill a render
+        print(f"[clip] ⚠ Haar cascade unusable ({e}) — face tracking OFF, centre crop",
+              flush=True)
+        return None
+    return cascade
+
+
 def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     """Crop the cut clip to the target aspect ratio, tracking faces if possible."""
     try:
@@ -73,7 +107,7 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     crop_w = max(2, crop_w - (crop_w % 2))
     crop_h = max(2, crop_h - (crop_h % 2))
 
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    face_cascade = _load_face_cascade(cv2)
 
     silent_path = out_path + ".silent.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -86,8 +120,11 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
         if not ret:
             break
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        faces = ()
+        if face_cascade is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
         if len(faces) > 0:
             # Pick the largest face — usually the speaker.
             x, y, w, h = max(faces, key=lambda f: f[2] * f[3])

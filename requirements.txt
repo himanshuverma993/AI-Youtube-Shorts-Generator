@@ -6,7 +6,13 @@ groq>=0.11.0
 cerebras-cloud-sdk>=1.0.0
 python-dotenv>=1.0
 yt-dlp>=2024.8.6
-opencv-python-headless>=4.8.0
+# PINNED <5 ON PURPOSE. OpenCV 5.0 removed cv2.CascadeClassifier entirely and
+# ships an EMPTY cv2/data/ (no haarcascade_*.xml), so the face-aware 9:16
+# reframe in local/clipper.py dies with
+#     AttributeError: module 'cv2' has no attribute 'CascadeClassifier'
+# The old unpinned ">=4.8.0" resolved to 5.0.0.93 on the runner. 4.14.0 is the
+# newest release that still provides the detector and the bundled cascades.
+opencv-python-headless>=4.8.0,<5
 faster-whisper>=1.0.0
 huggingface-hub>=0.24.0
 llama-cpp-python>=0.2.80
