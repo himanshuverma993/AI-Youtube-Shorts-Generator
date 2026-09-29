@@ -1,0 +1,133 @@
+################################################################################
+# EVIDENCE EXCERPT — GitHub Actions run 36494468151 ("Run clipping campaign")
+# Repo   : himanshuverma993/AI-Youtube-Shorts-Generator
+# Job    : clip (109170667907)
+# Commit : a7898199b9181735a0e4ce3e041c8ceeb9e9b627 (main, post PR #2 merge)
+# Event  : schedule | run_number 1 | run_attempt 1
+# Window : 2026-09-28T22:47:47Z -> 2026-09-28T22:52:06Z (4m19s) | conclusion: FAILURE
+#
+# Retrieved 2026-09-29 ~01:52 UTC. `gh run view --log` / `gh api .../logs` both
+# fail from this sandbox because the log redirect target
+# (productionresultssa2.blob.core.windows.net) is network-blocked
+# (curl: (35) OpenSSL SSL_connect: SSL_ERROR_SYSCALL). Text below was pulled
+# through an out-of-band HTTP fetch of the same signed blob URL and is verbatim.
+################################################################################
+
+
+=== [A] TOOLCHAIN ACTUALLY INSTALLED (step "Install Python dependencies") ===
+
+2026-09-28T22:52:00.4752901Z Successfully installed ... faster-whisper-1.2.1
+  groq-1.7.0 cerebras-cloud-sdk-1.91.0 llama-cpp-python-0.3.35
+  opencv-python-headless-5.0.0.93 numpy-2.2.6 yt-dlp-2026.8.19
+                                              ^^^^^^^^^^^^^^^^
+  Python runtime: /opt/hostedtoolcache/Python/3.10.21/x64
+  Runner image  : ubuntu-24.04 (20260920.314.1), Azure region westus2
+
+
+=== [B] CACHE STATE (both restore steps = cold) ===
+
+2026-09-28T22:52:01.3824924Z Cache not found for input keys: campaign-state-36494468151, campaign-state-
+2026-09-28T22:52:01.7432905Z Cache not found for input keys: local-model-weights-v1
+
+  Cache inputs echoed by the action:
+2026-09-28T22:52:01.0038021Z   key: campaign-state-36494468151
+2026-09-28T22:52:01.0038312Z   restore-keys: campaign-state-
+2026-09-28T22:52:01.0039290Z   save-always: false          <-- see finding N2
+
+
+=== [C] STEP "Generate clips" — RESOLVED ENV (upload switches) ===
+
+2026-09-28T22:52:01.7630350Z   GROQ_API_KEY: ***
+2026-09-28T22:52:01.7630559Z   CEREBRAS_API_KEY:
+2026-09-28T22:52:01.7630978Z   UPLOAD_ENABLED: false
+2026-09-28T22:52:01.7631193Z   YT_PRIVACY: private
+2026-09-28T22:52:01.7631415Z   IG_UPLOAD_ENABLED: false
+2026-09-28T22:52:01.7631851Z   WHISPER_PROVIDER: auto
+2026-09-28T22:52:01.7632070Z   LLM_PROVIDER: auto
+2026-09-28T22:52:01.7632688Z   IG_ACCESS_TOKEN:
+2026-09-28T22:52:01.7633247Z   IG_USER_ID:
+2026-09-28T22:52:01.7632479Z   GOOGLE_CLIENT_SECRET:
+2026-09-28T22:52:01.7632688Z   YT_REFRESH_TOKEN:
+2026-09-28T22:52:01.7627168Z   YT_COOKIES_B64:            <-- EMPTY => cookie step skipped
+
+
+=== [D] CAMPAIGN BANNER — THE REQUESTED WATERMARKS ===
+
+2026-09-28T22:52:01.7720587Z ▶ Batch mode — processing new URLs from campaign/urls.txt
+2026-09-28T22:52:01.9086816Z [campaign] 2026-09-28 22:52:01 UTC
+2026-09-28T22:52:01.9087499Z [campaign] urls file: campaign/urls.txt (1 total, 0 done, 0 skipped after 3 strikes, 1 to do)
+2026-09-28T22:52:01.9089715Z [campaign] backends — Groq: ✓ | Cerebras: ✗ | local CPU tier-3: ✓ (zero-key doomsday mode)
+2026-09-28T22:52:01.9090526Z [campaign] providers — whisper: Groq → local fallback | llm: Groq → Cerebras → local
+2026-09-28T22:52:01.9119483Z [campaign] feedback loop: off (OAuth trio not set — see scripts/oauth_local_setup.py)
+2026-09-28T22:52:01.9146031Z [campaign] auto-upload: off (UPLOAD_ENABLED=false or OAuth trio unset)      <== WATERMARK FOUND
+2026-09-28T22:52:01.9146900Z [campaign] instagram upload: off (IG_UPLOAD_ENABLED=false or token/user-id unset)
+
+
+=== [E] THE FAILURE — yt-dlp YouTube bot check, 1.03s into the download ===
+
+2026-09-28T22:52:01.9147427Z [campaign] (1/1) https://www.youtube.com/watch?v=ULsyvuvg-NU
+2026-09-28T22:52:02.1027783Z [download/local] https://www.youtube.com/watch?v=ULsyvuvg-NU @ 720p → output/
+2026-09-28T22:52:02.1041747Z Deprecated Feature: Support for Python version 3.10 has been deprecated. Please update to Python 3.11 or above
+2026-09-28T22:52:03.1310859Z ERROR: [youtube] ULsyvuvg-NU: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies. Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  for tips on effectively exporting YouTube cookies
+2026-09-28T22:52:03.1316448Z [campaign] ❌ failed: ERROR: [youtube] ULsyvuvg-NU: Sign in to confirm you’re not a bot. ...
+2026-09-28T22:52:03.1319661Z [campaign] will retry next run (2 attempt(s) left before strike-out)
+2026-09-28T22:52:03.1321431Z Traceback (most recent call last):
+2026-09-28T22:52:03.1329071Z   File ".../yt_dlp/YoutubeDL.py", line 1731, in wrapper
+2026-09-28T22:52:03.1330045Z     return func(self, *args, **kwargs)
+2026-09-28T22:52:03.1331099Z   File ".../yt_dlp/YoutubeDL.py", line 1866, in __extract_info
+2026-09-28T22:52:03.1332110Z     ie_result = ie.extract(url)
+2026-09-28T22:52:03.1333056Z   File ".../yt_dlp/extractor/common.py", line 765, in extract
+2026-09-28T22:52:03.1333970Z     ie_result = self._real_extract(url)
+2026-09-28T22:52:03.1335072Z   File ".../yt_dlp/extractor/youtube/_video.py", line 4076, in _real_extract
+2026-09-28T22:52:03.1336230Z     self.raise_no_formats(reason, expected=True)
+2026-09-28T22:52:03.1337435Z   File ".../yt_dlp/extractor/common.py", line 1272, in raise_no_formats
+2026-09-28T22:52:03.1339000Z     raise ExtractorError(msg, expected=expected, video_id=video_id)
+2026-09-28T22:52:03.1342249Z yt_dlp.utils.ExtractorError: [youtube] ULsyvuvg-NU: Sign in to confirm you’re not a bot. ...
+2026-09-28T22:52:03.1345243Z During handling of the above exception, another exception occurred:
+2026-09-28T22:52:03.1345849Z Traceback (most recent call last):
+2026-09-28T22:52:03.1346830Z   File ".../campaign_runner.py", line 188, in main
+2026-09-28T22:52:03.1348009Z     result = generate_shorts(
+2026-09-28T22:52:03.1349091Z   File ".../shorts_generator/pipeline.py", line 68, in generate_shorts
+2026-09-28T22:52:03.1350442Z     source_path = download_youtube_local(youtube_url, fmt=download_format)
+2026-09-28T22:52:03.1351872Z   File ".../shorts_generator/local/downloader.py", line 131, in download_youtube_local
+2026-09-28T22:52:03.1353068Z     info = ydl.extract_info(video_url, download=True)
+2026-09-28T22:52:03.1364733Z yt_dlp.utils.DownloadError: ERROR: [youtube] ULsyvuvg-NU: Sign in to confirm you’re not a bot. ...
+
+
+=== [F] RUN TAIL — 0 clips, exit 1, artifact step never ran ===
+
+2026-09-28T22:52:03.1367878Z [campaign] finished: 0 ok, 1 failed, 0 skipped
+2026-09-28T22:52:03.1368568Z [campaign] run summary → output/campaign_20260928_225201/summary.json
+2026-09-28T22:52:03.1643504Z ##[error]Process completed with exit code 1.
+2026-09-28T22:52:03.1782503Z Post job cleanup.
+2026-09-28T22:52:03.3894035Z Cleaning up orphan processes
+
+  NOTE: no "Cache saved with key ..." line appears anywhere after the failure —
+  the two actions/cache post-steps report conclusion "skipped" in the jobs API,
+  so campaign/failed_urls.txt (strike 1/3) was NOT persisted. See finding N2.
+
+
+=== [G] STEP CONCLUSIONS (from GET /actions/runs/36494468151/jobs) ===
+
+  1  Set up job ......................................... success
+  2  Checkout ........................................... success
+  3  Set up Python 3.10 ................................. success
+  4  Install system dependencies ........................ success
+  5  Install Python dependencies ........................ success  (22:48:21→22:52:00)
+  6  Prepare directories ................................ success
+  7  Restore campaign state ............................. success  (cold miss)
+  8  Cache tier-3 local model weights ................... success  (cold miss)
+  9  Decode optional YouTube cookies for yt-dlp ......... SKIPPED  (YT_COOKIES_B64 empty)
+ 10  Generate clips ..................................... FAILURE  (22:52:01→22:52:03, 2s)
+ 11  Upload clips + metadata JSON ....................... SKIPPED  <-- why 0 artifacts
+ 19  Post Cache tier-3 local model weights .............. SKIPPED
+ 20  Post Restore campaign state ........................ SKIPPED
+ 21  Post Set up Python 3.10 ............................ SKIPPED
+ 22  Post Checkout ...................................... success
+ 23  Complete job ....................................... success
+
+
+=== [H] ARTIFACTS ===
+
+$ gh api repos/:owner/:repo/actions/runs/36494468151/artifacts
+{"total_count":0,"artifacts":[]}

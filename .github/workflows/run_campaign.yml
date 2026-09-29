@@ -45,6 +45,11 @@ concurrency:
 env:
   # secrets may not be referenced in step-level `if:` — mirror to env instead.
   YT_COOKIES_B64: ${{ secrets.YT_COOKIES_B64 }}
+  # Optional yt-dlp InnerTube client pin, e.g. "tv,web_safari". Empty = the
+  # built-in rotation in shorts_generator/local/downloader.py, which retries a
+  # bot-checked download under alternate clients before giving up. Job-level so
+  # the diagnostics step can report it too.
+  YTDLP_PLAYER_CLIENTS: ${{ vars.YTDLP_PLAYER_CLIENTS }}
 
 jobs:
   clip:
@@ -170,7 +175,41 @@ jobs:
             python campaign_runner.py --urls-file campaign/urls.txt "${ARGS[@]}"
           fi
 
+      - name: Collect diagnostics
+        # Runs even when "Generate clips" fails. The 2026-09-28 live test
+        # (run 36494468151) died on a yt-dlp bot check and produced ZERO
+        # artifacts, because the upload step below is skipped on failure by
+        # default — so triage needed the raw runner logs. This step plus the
+        # `if: always()` on the upload guarantee the Artifacts panel always
+        # carries the campaign summary and the toolchain versions.
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p output/diagnostics
+          {
+            echo "run_id=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} event=${GITHUB_EVENT_NAME}"
+            echo "collected_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner=${RUNNER_OS} image=${ImageOS:-unknown}"
+            echo "python=$(python -V 2>&1)"
+            echo "yt_dlp=$(python -m yt_dlp --version 2>&1 | tail -1)"
+            echo "ffmpeg=$(ffmpeg -version 2>/dev/null | head -1)"
+            echo "cookies_configured=$([ -n "${YTDLP_COOKIES_FILE:-}" ] && echo yes || echo no)"
+            echo "player_clients=${YTDLP_PLAYER_CLIENTS:-<default rotation>}"
+          } > output/diagnostics/environment.txt
+          for f in campaign/failed_urls.txt campaign/processed_urls.txt; do
+            [ -f "$f" ] && cp "$f" output/diagnostics/ || true
+          done
+          find output -maxdepth 3 -type f \
+            \( -name 'summary.json' -o -name 'result_*.json' -o -name 'short_*.mp4' \) \
+            > output/diagnostics/manifest.txt 2>/dev/null || true
+          echo "--- diagnostics ---"
+          cat output/diagnostics/environment.txt
+
       - name: Upload clips + metadata JSON
+        # `always()` so a FAILED run still ships summary.json + diagnostics —
+        # without it a red run leaves nothing to download and the only
+        # evidence is the ephemeral runner log.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shorts-${{ github.run_number }}-${{ github.run_attempt }}
@@ -180,3 +219,4 @@ jobs:
             output/short_*.mp4
             output/result.json
             output/campaign_*/
+            output/diagnostics/
