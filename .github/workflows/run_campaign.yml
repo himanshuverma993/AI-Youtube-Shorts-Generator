@@ -50,6 +50,8 @@ env:
   # bot-checked download under alternate clients before giving up. Job-level so
   # the diagnostics step can report it too.
   YTDLP_PLAYER_CLIENTS: ${{ vars.YTDLP_PLAYER_CLIENTS }}
+  NUM_CLIPS: ${{ github.event.inputs.num_clips }}
+  ASPECT_RATIO: ${{ github.event.inputs.aspect_ratio }}
 
 jobs:
   clip:
@@ -176,7 +178,11 @@ jobs:
           LANGUAGE: ${{ github.event.inputs.language }}
         run: |
           set -e
-          ARGS=(--num-clips "${NUM_CLIPS:-3}" --aspect-ratio "${ASPECT_RATIO:-9:16}")
+          requested_num_clips="${NUM_CLIPS:-3}"
+          requested_aspect_ratio="${ASPECT_RATIO:-9:16}"
+          echo "requested_num_clips=${requested_num_clips}"
+          echo "requested_aspect_ratio=${requested_aspect_ratio}"
+          ARGS=(--num-clips "${requested_num_clips}" --aspect-ratio "${requested_aspect_ratio}")
           if [ -n "${LANGUAGE:-}" ]; then
             ARGS+=(--language "${LANGUAGE}")
           fi
@@ -209,6 +215,8 @@ jobs:
             echo "ffmpeg=$(ffmpeg -version 2>/dev/null | head -1)"
             echo "cookies_configured=$([ -n "${YTDLP_COOKIES_FILE:-}" ] && echo yes || echo no)"
             echo "player_clients=${YTDLP_PLAYER_CLIENTS:-<default rotation>}"
+            echo "requested_num_clips=${NUM_CLIPS:-3}"
+            echo "requested_aspect_ratio=${ASPECT_RATIO:-9:16}"
             echo ""
             # Disk is a real failure mode here: a 19-minute 720p source is
             # ~300 MB and the runner starts with ~14 GB free. A run that dies

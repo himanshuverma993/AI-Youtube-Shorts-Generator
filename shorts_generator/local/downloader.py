@@ -24,7 +24,7 @@ from ..config import OUTPUT_DIR
 # "default" = let yt-dlp pick (no extractor_args), i.e. today's behaviour, so
 # a healthy run costs exactly one extra dict lookup. Override the whole chain
 # with YTDLP_PLAYER_CLIENTS="tv,web_safari" if YouTube shifts again.
-DEFAULT_PLAYER_CLIENTS = ("default", "tv_simply", "android_vr", "tv", "web_safari", "mweb")
+DEFAULT_PLAYER_CLIENTS = ("default", "android_vr", "tv", "web_safari")
 
 # Errors that mean "this client was refused" rather than "this video is gone".
 # Deliberately narrow: a private/deleted/geo-blocked video must fail fast on
@@ -154,8 +154,8 @@ def _format_for(fmt: str) -> str:
     except ValueError:
         height = 720
     return (
-        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
-        f"best[height<={height}][ext=mp4]/best"
+        f"bestvideo[height<={height}]+bestaudio/"
+        f"best[height<={height}]/best"
     )
 
 
@@ -302,7 +302,7 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
     base_opts = {
         "format": _format_for(fmt),
         "outtmpl": os.path.join(out_dir, "source_%(id)s.%(ext)s"),
-        "merge_output_format": "mp4",
+        "merge_output_format": "mp4/mkv",
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -332,37 +332,43 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 path = ydl.prepare_filename(info)
-                # merge_output_format may rename the extension after merge
-                if not os.path.exists(path):
-                    stem, _ = os.path.splitext(path)
-                    for ext in (".mp4", ".mkv", ".webm"):
-                        if os.path.exists(stem + ext):
-                            path = stem + ext
-                            break
         except Exception as e:  # noqa: BLE001 - classified below
             last_err = e
             kind = _error_kind(e)
             # DISK: a failed attempt can leave a multi-hundred-MB .part file.
-            # Purge before the NEXT client retries, otherwise a 5-client
-            # rotation over a big video can strand 5 partial copies at once.
+            # Purge before the NEXT client retries, otherwise a client
+            # rotation over a big video can strand partial copies at once.
             purge_partial_downloads(out_dir, video_id)
-            blocked = kind == "refused"
+            retryable = kind in ("refused", "format")
             more = attempt < len(clients)
             print(f"[download/local] player_client={client} failed: {_safe_error(kind)}", flush=True)
-            if blocked and more:
+            if retryable and more:
                 print(f"[download/local] retrying with player_client={clients[attempt]} "
                       f"({attempt}/{len(clients)} exhausted)", flush=True)
                 continue
-            if not blocked:
+            if not retryable:
                 # Raise outside the except so __context__ cannot contain secrets.
                 terminal_error = _safe_error(kind)
                 break
             break
         else:
+            # yt-dlp merge_output_format may produce .mp4 or fallback to .mkv (or .webm)
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                stem, _ = os.path.splitext(path)
+                for ext in (".mp4", ".mkv", ".webm"):
+                    candidate = stem + ext
+                    if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
+                        path = candidate
+                        break
             # Guard against a "successful" extract that produced nothing on
             # disk: yt-dlp can report success for a format it then failed to
             # merge, and an empty source poisons every downstream stage.
             if not os.path.exists(path) or os.path.getsize(path) == 0:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
                 purge_partial_downloads(out_dir, video_id)
                 last_err = RuntimeError("yt-dlp reported success but produced no usable file")
                 if attempt < len(clients):
@@ -381,10 +387,10 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
 
     raise RuntimeError(
         f"YouTube refused every InnerTube client ({', '.join(clients)}). "
-        "Likely runner IP block or stale/invalid cookie session; check access "
-        "to this video locally. "
+        "Likely runner IP block or stale/invalid cookie session; clients either "
+        "lacked usable formats or required a PO Token. Check access to this video locally. "
         + ("Cookies file was configured (format valid, session not verified). "
            if have_cookies else "Cookies NOT configured; set YT_COOKIES_B64 with a Netscape cookies.txt. ")
-        + ("Last attempt produced no usable file." if last_err and not _is_client_blocked(last_err)
-           else "All clients returned a YouTube refusal.")
+        + ("Last attempt produced no usable file." if last_err and str(last_err) == "yt-dlp reported success but produced no usable file"
+           else "All attempted clients lacked usable formats or required a PO Token / were refused.")
     ) from None
