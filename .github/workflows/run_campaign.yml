@@ -246,11 +246,21 @@ jobs:
             output/campaign_*/
             output/diagnostics/
 
+      - name: Check tier-3 model weights for cache save
+        if: always() && steps.model-weights.outputs.cache-hit != 'true'
+        id: model-cache-check
+        shell: bash
+        run: |
+          if [ -d models ] && [ -n "$(find models -type f -print -quit)" ]; then
+            echo "has-weights=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "[cache] no local model files to save"
+          fi
+
       - name: Save tier-3 local model weights
         # Only when the restore missed — the key is static, so re-saving an
         # existing entry would just warn "cache already exists" every run.
-        if: always() && steps.model-weights.outputs.cache-hit != 'true'
-        continue-on-error: true
+        if: always() && steps.model-cache-check.outputs.has-weights == 'true'
         uses: actions/cache/save@v4
         with:
           path: models
@@ -271,6 +281,10 @@ jobs:
         continue-on-error: true
         run: python scripts/prune_state_cache.py
 
+      - name: Ensure campaign cache paths exist
+        if: always()
+        run: python scripts/prepare_campaign_cache.py
+
       - name: Save campaign state (ledgers + transcript caches)
         # `always()` is the whole point: a run that dies mid-way has still
         # earned its transcript caches and ledger updates, and throwing them
@@ -278,7 +292,6 @@ jobs:
         # campaign_runner only strikes a URL for CONTENT failures, so a
         # bot-check/outage persisted here cannot retire a good video.
         if: always()
-        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: |
