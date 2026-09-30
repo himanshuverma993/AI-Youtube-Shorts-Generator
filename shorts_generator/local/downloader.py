@@ -37,7 +37,9 @@ _CLIENT_BLOCKED_MARKERS = (
     "unable to extract player response",
     "content is not available on this app",
     "please sign in",
-    "requested format is not available",
+    # YouTube bot-check / client refusal variants:
+    "the page needs to be reloaded",
+    "reload the page",
 )
 
 
@@ -49,7 +51,79 @@ def _normalize_err(msg: str) -> str:
 
 def _is_client_blocked(err: BaseException) -> bool:
     msg = _normalize_err(str(err))
+    if any(marker in msg for marker in (*_PERMANENT_MARKERS, *_FORMAT_MARKERS, *_COOKIE_ERROR_MARKERS)):
+        return False
     return any(marker in msg for marker in _CLIENT_BLOCKED_MARKERS)
+
+
+# Check permanent causes FIRST: some yt-dlp errors contain generic words such
+# as "sign in" even when the video is private rather than client-refused.
+_PERMANENT_MARKERS = (
+    "private video", "video is private", "video unavailable", "deleted video",
+    "has been removed", "not available in your country", "not available in your region",
+    "blocked in your country", "not available in this country",
+    "not available in your location", "this video is not available",
+    "this video is unavailable", "video has been removed",
+    "copyright claim", "copyright grounds", "copyright owner",
+)
+_FORMAT_MARKERS = ("requested format is not available", "requested format unavailable")
+_COOKIE_ERROR_MARKERS = (
+    "invalid netscape format", "does not look like a netscape format",
+    "could not load cookies", "failed to load cookies", "cookie file is invalid",
+)
+
+
+def _error_kind(err: BaseException) -> str:
+    msg = _normalize_err(str(err))
+    if any(marker in msg for marker in _COOKIE_ERROR_MARKERS):
+        return "cookies"
+    if any(marker in msg for marker in _PERMANENT_MARKERS):
+        return "unavailable"
+    if any(marker in msg for marker in _FORMAT_MARKERS):
+        return "format"
+    if _is_client_blocked(err):
+        return "refused"
+    return "other"
+
+
+def _safe_error(kind: str) -> str:
+    return {
+        "cookies": "Cookie file rejected by yt-dlp. Re-export a Netscape cookies.txt and update YT_COOKIES_B64.",
+        "unavailable": "Video is private, deleted, geo/copyright-blocked or otherwise unavailable; check access to the video.",
+        "format": "Requested format unavailable for this video; try another resolution/format.",
+        "refused": "YouTube refused this player client (bot check / reload request).",
+        "other": "Download failed for an unclassified reason; inspect yt-dlp locally without sharing credentials.",
+    }[kind]
+
+
+def _validate_cookie_file(path: str) -> None:
+    """Format-only preflight, never log paths/contents or assume a cookie name.
+
+    yt-dlp/YouTube, not this check, decide whether the session is usable.
+    """
+    valid = True
+    try:
+        with open(path, "rb") as fh:
+            header = fh.readline(4096).strip()
+            if header not in (b"# Netscape HTTP Cookie File", b"# HTTP Cookie File"):
+                raise ValueError("bad header")
+            found = False
+            for line in fh:
+                if not line.strip() or (line.startswith(b"#") and not line.startswith(b"#HttpOnly_")):
+                    continue
+                if len(line.rstrip(b"\r\n").split(b"\t")) == 7:
+                    found = True
+                    break
+            if not found:
+                raise ValueError("no Netscape cookie rows")
+    except (OSError, ValueError):
+        valid = False
+    if not valid:
+        # Outside the except: no raw path-containing exception in __context__.
+        raise RuntimeError(
+            "YTDLP_COOKIES_FILE is missing, empty or malformed. Export a non-empty "
+            "Netscape cookies.txt and set YT_COOKIES_B64; cookie contents are not logged."
+        )
 
 
 def _player_clients() -> list:
@@ -207,6 +281,10 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
         print(f"[download/local] using local file: {local_path}", flush=True)
         return local_path
 
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    if cookies_file:
+        _validate_cookie_file(cookies_file)
+
     yt_dlp = _import_ytdlp()
     out_dir = out_dir or OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
@@ -218,7 +296,9 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
             print(f"[download/local] reusing cached download: {cached}", flush=True)
             return cached
 
-    print(f"[download/local] {video_url} @ {fmt}p → {out_dir}/", flush=True)
+    safe_id = video_id if video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else "(id unavailable)"
+    print(f"[download/local] downloading YouTube video {safe_id}" if video_id
+          else "[download/local] downloading remote video", flush=True)
     base_opts = {
         "format": _format_for(fmt),
         "outtmpl": os.path.join(out_dir, "source_%(id)s.%(ext)s"),
@@ -232,19 +312,18 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
         "extractor_retries": 2,
     }
 
-    # Optional authenticated downloads — vital on datacenter IPs (GitHub
-    # Actions runners) where YouTube frequently bot-checks anonymous traffic.
-    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
-    have_cookies = bool(cookies_file and os.path.exists(cookies_file))
+    # Preflight checks file structure only; never print the path or cookie data.
+    have_cookies = bool(cookies_file)
     if have_cookies:
         base_opts["cookiefile"] = cookies_file
-        print(f"[download/local] using cookie file: {cookies_file}", flush=True)
+        print("[download/local] cookie file format validated (session not verified)", flush=True)
 
     # Only YouTube has the InnerTube client concept — everything else gets a
     # single straightforward attempt.
     clients = _player_clients() if video_id else ["default"]
 
     last_err: Optional[BaseException] = None
+    terminal_error: Optional[str] = None
     for attempt, client in enumerate(clients, 1):
         ydl_opts = dict(base_opts)
         if client != "default":
@@ -262,24 +341,22 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
                             break
         except Exception as e:  # noqa: BLE001 - classified below
             last_err = e
+            kind = _error_kind(e)
             # DISK: a failed attempt can leave a multi-hundred-MB .part file.
             # Purge before the NEXT client retries, otherwise a 5-client
             # rotation over a big video can strand 5 partial copies at once.
             purge_partial_downloads(out_dir, video_id)
-            blocked = _is_client_blocked(e)
+            blocked = kind == "refused"
             more = attempt < len(clients)
-            print(
-                f"[download/local] player_client={client} failed "
-                f"({'bot-check/client refusal' if blocked else type(e).__name__}): "
-                f"{str(e).splitlines()[0][:200]}",
-                flush=True,
-            )
+            print(f"[download/local] player_client={client} failed: {_safe_error(kind)}", flush=True)
             if blocked and more:
                 print(f"[download/local] retrying with player_client={clients[attempt]} "
                       f"({attempt}/{len(clients)} exhausted)", flush=True)
                 continue
             if not blocked:
-                raise  # genuinely unavailable video — fail fast, don't burn retries
+                # Raise outside the except so __context__ cannot contain secrets.
+                terminal_error = _safe_error(kind)
+                break
             break
         else:
             # Guard against a "successful" extract that produced nothing on
@@ -287,9 +364,7 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
             # merge, and an empty source poisons every downstream stage.
             if not os.path.exists(path) or os.path.getsize(path) == 0:
                 purge_partial_downloads(out_dir, video_id)
-                last_err = RuntimeError(
-                    f"yt-dlp reported success but produced no usable file at {path}"
-                )
+                last_err = RuntimeError("yt-dlp reported success but produced no usable file")
                 if attempt < len(clients):
                     print(f"[download/local] player_client={client} produced an "
                           f"empty file — trying {clients[attempt]}", flush=True)
@@ -301,15 +376,15 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
             print(f"[download/local] ready: {path}", flush=True)
             return path
 
+    if terminal_error:
+        raise RuntimeError(terminal_error)
+
     raise RuntimeError(
-        f"YouTube refused every InnerTube client ({', '.join(clients)}) for {video_url}.\n"
-        "  This is YouTube bot-checking the runner's datacenter IP, not a bug in the clip\n"
-        "  pipeline. Fixes, cheapest first:\n"
-        "    1. Wait for the next scheduled tick — the block is IP- and time-dependent.\n"
-        "    2. Set the YT_COOKIES_B64 repo secret (base64 of a Netscape cookies.txt from\n"
-        "       a logged-in YouTube session); the workflow already decodes it into\n"
-        "       YTDLP_COOKIES_FILE and yt-dlp picks it up automatically.\n"
-        "    3. Pin a different client chain via the YTDLP_PLAYER_CLIENTS variable.\n"
-        f"  Cookies were {'PRESENT' if have_cookies else 'NOT configured'} for this attempt.\n"
-        f"  Last error: {last_err}"
-    ) from last_err
+        f"YouTube refused every InnerTube client ({', '.join(clients)}). "
+        "Likely runner IP block or stale/invalid cookie session; check access "
+        "to this video locally. "
+        + ("Cookies file was configured (format valid, session not verified). "
+           if have_cookies else "Cookies NOT configured; set YT_COOKIES_B64 with a Netscape cookies.txt. ")
+        + ("Last attempt produced no usable file." if last_err and not _is_client_blocked(last_err)
+           else "All clients returned a YouTube refusal.")
+    ) from None
