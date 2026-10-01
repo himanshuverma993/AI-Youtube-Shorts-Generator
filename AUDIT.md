@@ -101,3 +101,65 @@ Adversarial battery: 41/41 cases green — every ledger/queue/registry/stats/
 token-store/trend-cache loader survives missing/empty/invalid-JSON/wrong-type/
 wrong-shape files; valid cache hits still served; forced 401 on the token
 exchange leaks zero secret bytes; full compile clean.
+
+---
+
+## Fourth pass — CI download chain + stage diagnosis (2026-10-01)
+
+Scope: the "clips ban hi nahi rahi" report. Root cause was re-derived from
+`output/live-test/HANDOFF.md` rather than assumed, then the download path was
+re-read line by line against yt-dlp 2026.08.19.
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| C1 | 🟠 | `DEFAULT_PLAYER_CLIENTS` led with `"default"`, i.e. yt-dlp's **web** client — the exact client that produced `Sign in to confirm you're not a bot` in run 36494468151. On a GitHub Actions runner (datacenter IP) the first attempt was therefore a *guaranteed* failure, burning that attempt plus its `extractor_retries` before the rotation designed to avoid it ever started. | New `CI_PLAYER_CLIENTS = ("tv_simply","android_vr","tv","web_safari","mweb","default")`, selected by `_on_ci()` (`GITHUB_ACTIONS` / `CI`). Residential ordering unchanged. All six names validated against yt-dlp 2026.08.19's own client table in `yt_dlp/extractor/youtube/_base.py` — `tv_simply` and `mweb` were valid but previously unused. `YTDLP_PLAYER_CLIENTS` still overrides both. |
+| C2 | 🟡 | `selftest_downloader.py::run()` cleared `YTDLP_PLAYER_CLIENTS` but **not** `GITHUB_ACTIONS` / `CI`. Once C1 landed, the suite's expected client chains would differ depending on where it ran — and this suite is itself executed on GitHub Actions, where both are set, so it would have failed only in CI. | `run()` now pops both, so every case asserts a deterministic chain. |
+| C3 | ⚪ | No way to answer "which stage is actually broken?" — a stage-1 download failure is indistinguishable from a stage-4 render failure from the outside: both yield zero clips. | New `scripts/diagnose.py`: checks runtime, binaries, deps, credentials, real HTTPS reachability, live download with client attribution, and a real end-to-end pipeline run. Reports SKIP (never PASS) for anything it could not execute; exits 1 on any FAIL. |
+
+### A false PASS caught during verification
+
+The first version of `diagnose.py` probed reachability with a bare TCP connect
+and reported `PASS www.youtube.com:443 TCP connect OK`. That was **wrong**: the
+sandbox accepts the connection and then terminates the TLS handshake. Verified
+directly —
+
+```
+www.youtube.com: TCP connect  -> OK
+www.youtube.com: TLS handshake-> FAIL  SSLZeroReturnError: TLS/SSL connection has been closed (EOF)
+```
+
+The probe now performs the real TLS handshake *and* an HTTPS GET, and reports the
+deepest step reached. Post-fix it correctly reports the host as unreachable.
+
+### Regression coverage added (`scripts/selftest_downloader.py`)
+
+`C1`–`C4`: CI chain skips the leading web client and still recovers; all six CI
+clients are exhausted before one actionable `RuntimeError`; the residential chain
+still leads with `default`; an explicit override beats the CI chain.
+
+### Battery (all green, this tree)
+
+```
+py_compile every tracked .py .................. OK
+selftest_audit ................................ ALL 83 CHECKS PASSED
+selftest_pipeline ............................. ALL CHECKS PASSED
+selftest_clipper .............................. ALL CHECKS PASSED (T5 end-to-end
+                                                9:16 render included — it was
+                                                previously SKIPPED for want of
+                                                ffmpeg/PyAV, i.e. the repo's most
+                                                visual-critical path had never
+                                                actually executed)
+selftest_downloader ........................... ALL CHECKS PASSED
+scripts/diagnose.py ........................... exits 1 with a truthful FAIL
+```
+
+### Still NOT verified — unchanged, and not claimed otherwise
+
+- **No live YouTube download has occurred.** YouTube is unreachable from this
+  sandbox (TLS terminated), so C1's chain is proven by unit tests and by the
+  client names being valid in yt-dlp's own table — **not** by a recovered
+  download.
+- **Groq Whisper has never run here** (no key). Hindi transcription quality,
+  hook quality and metadata integrity remain zero-data.
+- The workflow rerun is still operator-gated: the agent token is 403 on
+  workflow dispatch.

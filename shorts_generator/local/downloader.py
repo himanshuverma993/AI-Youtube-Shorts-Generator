@@ -26,6 +26,18 @@ from ..config import OUTPUT_DIR
 # with YTDLP_PLAYER_CLIENTS="tv,web_safari" if YouTube shifts again.
 DEFAULT_PLAYER_CLIENTS = ("default", "android_vr", "tv", "web_safari")
 
+# CI runners (GitHub Actions) egress from a datacenter IP range, which is
+# exactly the traffic YouTube bot-checks hardest — and "default" resolves to
+# yt-dlp's *web* client, i.e. the precise client that produced
+# "Sign in to confirm you're not a bot" in run 36494468151. Leading the chain
+# with it on CI burns a guaranteed-failure attempt (plus its extractor_retries)
+# before the rotation that exists to avoid it ever begins. So on CI lead with
+# the TV/embedded clients and keep "default" as the final fallback.
+#
+# All six names below were validated against yt-dlp 2026.08.19's own client
+# table (yt_dlp/extractor/youtube/_base.py) — tv_simply and mweb included.
+CI_PLAYER_CLIENTS = ("tv_simply", "android_vr", "tv", "web_safari", "mweb", "default")
+
 # Errors that mean "this client was refused" rather than "this video is gone".
 # Deliberately narrow: a private/deleted/geo-blocked video must fail fast on
 # the first client instead of burning five retries.
@@ -126,6 +138,15 @@ def _validate_cookie_file(path: str) -> None:
         )
 
 
+def _on_ci() -> bool:
+    """True on GitHub Actions / generic CI runners.
+
+    Their egress IP is a datacenter range, so the bot-check behaviour — and
+    therefore the best client ordering — differs from a residential connection.
+    """
+    return bool(os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"))
+
+
 def _player_clients() -> list:
     """The client rotation to try, honouring the YTDLP_PLAYER_CLIENTS override."""
     raw = os.environ.get("YTDLP_PLAYER_CLIENTS", "").strip()
@@ -133,7 +154,7 @@ def _player_clients() -> list:
         clients = [c.strip() for c in raw.split(",") if c.strip()]
         if clients:
             return clients
-    return list(DEFAULT_PLAYER_CLIENTS)
+    return list(CI_PLAYER_CLIENTS if _on_ci() else DEFAULT_PLAYER_CLIENTS)
 
 
 def _import_ytdlp():

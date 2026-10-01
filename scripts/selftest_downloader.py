@@ -79,6 +79,11 @@ def run(name, behaviour, url="https://www.youtube.com/watch?v=ULsyvuvg-NU", env=
     old = dict(os.environ)
     os.environ.pop("YTDLP_PLAYER_CLIENTS", None)
     os.environ.pop("YTDLP_COOKIES_FILE", None)
+    # These select the CI client chain. They MUST be cleared or the suite's
+    # expected chains differ depending on where it runs — and this suite is
+    # itself executed on GitHub Actions, where both are set.
+    os.environ.pop("GITHUB_ACTIONS", None)
+    os.environ.pop("CI", None)
     os.environ.update(env or {})
     try:
         from shorts_generator.local.downloader import download_youtube_local
@@ -198,6 +203,37 @@ check(_is_client_blocked(Exception(BOT)), "curly-apostrophe bot-check classified
 check(not _is_client_blocked(Exception("Video unavailable")), "'Video unavailable' NOT treated as bot-check")
 check(not _is_client_blocked(Exception("HTTP Error 404: Not Found")), "404 NOT treated as bot-check")
 check(_is_client_blocked(Exception(RELOAD)), "exact reload message classified as client refusal")
+
+print("\nC1: on CI the chain leads with TV clients, NOT the bot-checked web client")
+# Regression for run 36494468151: "default" (yt-dlp's web client) is exactly
+# what YouTube refuses on a datacenter IP, so leading with it there wastes a
+# guaranteed-failure attempt before the rotation starts.
+n, status, res, calls = run("C1", lambda c: BOT if c != "web_safari" else None,
+                            env={"GITHUB_ACTIONS": "true"})
+print(f"   clients tried: {calls}")
+check(calls == ["tv_simply", "android_vr", "tv", "web_safari"],
+      f"CI chain skips the leading web client: {calls}")
+check(calls[0] != "default", "CI does NOT open with the bot-checked 'default' client")
+check(status == "OK", "CI chain still recovers the download")
+
+print("\nC2: on CI every client is exhausted before giving up")
+n, status, res, calls = run("C2", lambda c: BOT, env={"GITHUB_ACTIONS": "true"})
+print(f"   clients tried: {calls}")
+check(calls == ["tv_simply", "android_vr", "tv", "web_safari", "mweb", "default"],
+      f"all 6 CI clients attempted: {calls}")
+check(status == "RuntimeError", "still fails with one actionable RuntimeError")
+
+print("\nC3: off CI the original residential chain is unchanged")
+n, status, res, calls = run("C3", lambda c: BOT, env={"GITHUB_ACTIONS": ""})
+print(f"   clients tried: {calls}")
+check(calls == ["default", "android_vr", "tv", "web_safari"],
+      f"local chain keeps 'default' first: {calls}")
+
+print("\nC4: an explicit override beats the CI chain")
+n, status, res, calls = run("C4", lambda c: BOT if c != "mweb" else None,
+                            env={"GITHUB_ACTIONS": "true", "YTDLP_PLAYER_CLIENTS": "tv,mweb"})
+print(f"   clients tried: {calls}")
+check(calls == ["tv", "mweb"], "override wins over the CI default chain")
 check(_is_client_blocked(Exception("Please reload the page")), "reload-the-page variant classified")
 check(not _is_client_blocked(Exception(PRIVATE)), "private video NOT classified as client refusal")
 check(not _is_client_blocked(Exception("Requested format is not available")), "format NOT classified as client refusal")
