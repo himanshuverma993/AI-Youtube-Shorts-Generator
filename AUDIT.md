@@ -163,3 +163,42 @@ scripts/diagnose.py ........................... exits 1 with a truthful FAIL
   hook quality and metadata integrity remain zero-data.
 - The workflow rerun is still operator-gated: the agent token is 403 on
   workflow dispatch.
+
+---
+
+## Fifth pass — cookie path hardening + pre-flight verification (2026-10-01)
+
+Triggered by the operator adding `YT_COOKIES_B64`. The whole cookie path was
+round-tripped exactly as the workflow performs it (`base64 -d` on GNU coreutils)
+before trusting it.
+
+| Case | b64 round-trip | downloader preflight |
+|---|---|---|
+| `# Netscape HTTP Cookie File` (Chrome ext.) | OK | accepted |
+| `# HTTP Cookie File` (Firefox) | OK | accepted |
+| `#HttpOnly_`-only rows | OK | accepted |
+| CRLF (Windows export) | OK | accepted |
+| header + comments, **no cookie rows** | OK | rejected (correct) |
+| UTF-8 **BOM** prefix | OK | was **rejected** — now accepted + warned |
+| plain text / empty | OK | rejected (correct) |
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| K1 | 🟠 | A UTF-8 BOM — written by Windows Notepad and by several cookie-export extensions — makes the first line no longer equal the Netscape magic, so a perfectly usable cookie file was rejected as "malformed". Three invisible bytes, reported as a format error. | `_validate_cookie_file` strips the BOM before comparing, accepts the file, and prints a warning that yt-dlp reads the magic line literally and may still refuse it. The BOM is *not* silently swallowed — the rejection message now names it. |
+| K2 | ⚪ | No way to validate a cookie file before spending a workflow run. An expired session is the classic silent killer: the file is well-formed, yt-dlp accepts it, and YouTube keeps bot-checking anyway. | `scripts/diagnose.py` gains `check_cookies()` / `--cookies <path>`: runs the downloader's own preflight (so a PASS here means a PASS there), decodes `YT_COOKIES_B64` itself, counts YouTube/Google rows, and fails on cookies that are **already past their expiry timestamp**. |
+
+Verified against four fixtures — fresh (all pass), expired (`FAIL`, 2 of 2 past
+expiry, actionable), BOM (`WARN`), garbage (`FAIL` on format).
+
+### Battery (still green)
+
+```
+selftest_audit ....... ALL 83 CHECKS PASSED
+selftest_pipeline .... ALL CHECKS PASSED
+selftest_clipper ..... ALL CHECKS PASSED
+selftest_downloader .. ALL CHECKS PASSED  (cookie-leak cases included)
+```
+
+**Still not provable here:** whether YouTube still honours the session. That
+needs a real download, and YouTube is unreachable from this sandbox. The
+`session validity` check is therefore a WARN, never a PASS.

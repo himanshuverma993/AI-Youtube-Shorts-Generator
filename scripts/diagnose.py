@@ -132,6 +132,104 @@ def check_credentials():
                "Set YT_COOKIES_B64 with a Netscape cookies.txt.")
 
 
+def check_cookies():
+    """Validate the cookie file the same way the downloader does, plus the two
+    things the downloader deliberately does NOT check: how many rows are
+    YouTube's, and whether any of them have already expired.
+
+    An expired session is the classic silent killer — the file is perfectly
+    well-formed, yt-dlp accepts it, and YouTube still bot-checks the request.
+    """
+    header("STAGE 0d — YouTube cookies (the bot-check fix)")
+    import base64
+    import time
+
+    path = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    tmp = None
+
+    if not path:
+        b64 = os.environ.get("YT_COOKIES_B64", "").strip()
+        if not b64:
+            record(SKIP, "cookies",
+                   "neither YTDLP_COOKIES_FILE nor YT_COOKIES_B64 is set. Pass "
+                   "--cookies /path/to/cookies.txt to check one.")
+            return
+        try:
+            raw = base64.b64decode(b64, validate=False)
+            tmp = tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False)
+            tmp.write(raw)
+            tmp.close()
+            path = tmp.name
+            record(PASS, "YT_COOKIES_B64", f"decodes cleanly ({len(raw)} bytes)")
+        except Exception as e:                                    # noqa: BLE001
+            record(FAIL, "YT_COOKIES_B64",
+                   f"not valid base64: {e}. Encode with: base64 -w0 cookies.txt")
+            return
+
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        record(FAIL, "cookie file", f"cannot read: {e}")
+        return
+    finally:
+        pass
+
+    # Same preflight the downloader runs, so a PASS here means a PASS there.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from shorts_generator.local.downloader import _validate_cookie_file
+        _validate_cookie_file(path)
+        record(PASS, "netscape format", "accepted by the downloader's preflight")
+    except Exception as e:                                        # noqa: BLE001
+        record(FAIL, "netscape format", str(e))
+        if tmp:
+            os.unlink(tmp.name)
+        return
+
+    if data.startswith(b"\xef\xbb\xbf"):
+        record(WARN, "BOM", "file starts with a UTF-8 BOM — yt-dlp may reject it; "
+                            "re-save as UTF-8 without BOM")
+
+    rows, yt_rows, expired = 0, 0, 0
+    now = time.time()
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith(b"#") and not line.startswith(b"#HttpOnly_"):
+            continue
+        f = line.split(b"\t")
+        if len(f) != 7:
+            continue
+        rows += 1
+        domain = f[0].lstrip(b"#").replace(b"HttpOnly_", b"").decode("utf-8", "replace")
+        if "youtube.com" in domain or "google.com" in domain:
+            yt_rows += 1
+        try:
+            exp = int(f[4])
+            if 0 < exp < now:
+                expired += 1
+        except (ValueError, IndexError):
+            pass
+
+    record(PASS if rows else FAIL, "cookie rows", f"{rows} row(s) parsed")
+    record(PASS if yt_rows else FAIL, "youtube/google rows",
+           f"{yt_rows} — these are the ones that matter for auth")
+    if expired:
+        record(FAIL, "expiry",
+               f"{expired} of {rows} cookie(s) have ALREADY EXPIRED. The file is "
+               "well-formed, so nothing errors — YouTube just keeps bot-checking. "
+               "Re-export cookies.txt from a browser where you are still signed in.")
+    else:
+        record(PASS, "expiry", "no cookie in this file is past its expiry")
+
+    record(WARN, "session validity",
+           "format + expiry only. Whether YouTube still honours this session can "
+           "only be proven by a real download — run with --url to test it.")
+    if tmp:
+        os.unlink(tmp.name)
+
+
 # ---------------------------------------------------------------- stage 1
 def check_network():
     header("STAGE 1 — network reachability (the #1 cause of zero clips)")
@@ -263,15 +361,21 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", help="YouTube URL to test the live download against")
     ap.add_argument("--file", help="Local video file — runs the real pipeline, skipping YouTube")
+    ap.add_argument("--cookies", help="Path to a Netscape cookies.txt to validate "
+                                      "(otherwise YTDLP_COOKIES_FILE / YT_COOKIES_B64 are used)")
     ap.add_argument("--format", default="720", help="download resolution (default 720)")
     args = ap.parse_args()
 
     print("AI YouTube Shorts Generator — stage diagnosis")
     print("Nothing here uploads, deletes sources, or touches your ledgers.")
 
+    if args.cookies:
+        os.environ["YTDLP_COOKIES_FILE"] = args.cookies
+
     check_runtime()
     check_dependencies()
     check_credentials()
+    check_cookies()
     check_network()
 
     source = args.file

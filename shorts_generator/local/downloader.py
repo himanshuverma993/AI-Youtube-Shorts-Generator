@@ -114,9 +114,17 @@ def _validate_cookie_file(path: str) -> None:
     yt-dlp/YouTube, not this check, decide whether the session is usable.
     """
     valid = True
+    bom = False
     try:
         with open(path, "rb") as fh:
             header = fh.readline(4096).strip()
+            # A UTF-8 BOM (\xef\xbb\xbf) is written by Windows Notepad and by
+            # some cookie-export extensions. It makes the first line no longer
+            # equal the Netscape magic, so the file is rejected here as
+            # "malformed" when the real problem is three invisible bytes.
+            if header.startswith(b"\xef\xbb\xbf"):
+                bom = True
+                header = header[3:].strip()
             if header not in (b"# Netscape HTTP Cookie File", b"# HTTP Cookie File"):
                 raise ValueError("bad header")
             found = False
@@ -135,7 +143,14 @@ def _validate_cookie_file(path: str) -> None:
         raise RuntimeError(
             "YTDLP_COOKIES_FILE is missing, empty or malformed. Export a non-empty "
             "Netscape cookies.txt and set YT_COOKIES_B64; cookie contents are not logged."
+            + (" NOTE: this file starts with a UTF-8 BOM — re-save it as plain "
+               "UTF-8 without BOM (yt-dlp reads the magic line literally)." if bom else "")
         )
+    if bom:
+        # Accepted by us, but yt-dlp reads the magic line literally and may
+        # still refuse it. Say so rather than letting it look clean.
+        print("[download/local] ⚠ cookie file starts with a UTF-8 BOM — if yt-dlp "
+              "rejects it, re-save as UTF-8 without BOM", flush=True)
 
 
 def _on_ci() -> bool:
